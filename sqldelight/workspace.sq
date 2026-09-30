@@ -1,0 +1,25 @@
+CREATE TABLE IF NOT EXISTS workspace (
+    id                       TEXT    NOT NULL PRIMARY KEY,
+    display_name             TEXT    NOT NULL,
+    description              TEXT    NOT NULL DEFAULT '',
+    icon_emoji               TEXT,
+    icon_image_path          TEXT,
+    tags_json                TEXT    NOT NULL DEFAULT '[]',
+    vault_backend_json       TEXT    NOT NULL,
+    vault_file_name          TEXT    NOT NULL,
+    local_target_path        TEXT    NOT NULL,
+    platform_path_overrides  TEXT    NOT NULL DEFAULT '{}',
+    vault_format_json        TEXT    NOT NULL,
+    key_mode_json            TEXT,
+    group_id                 TEXT    REFERENCES workspace_group(id) ON DELETE SET NULL,
+    retention_json           TEXT,
+    prefetch_json            TEXT,
+    platform_origin          TEXT    NOT NULL,
+    created_at               INTEGER NOT NULL,
+    last_active_at           INTEGER,
+    last_evicted_at          INTEGER,
+    uncompressed_bytes       INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_group ON workspace(group_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_lru   ON workspace(last_active_at);

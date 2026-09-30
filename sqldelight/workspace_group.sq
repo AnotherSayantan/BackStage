@@ -1,0 +1,8 @@
+CREATE TABLE IF NOT EXISTS workspace_group (
+    id            TEXT    NOT NULL PRIMARY KEY,
+    display_name  TEXT    NOT NULL,
+    color         INTEGER NOT NULL DEFAULT -10543360,
+    load_strategy TEXT    NOT NULL DEFAULT 'SPACE_AWARE',
+    member_order  TEXT    NOT NULL DEFAULT '[]',
+    created_at    INTEGER NOT NULL
+);
