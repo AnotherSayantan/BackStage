@@ -50,14 +50,8 @@ import androidx.compose.ui.window.WindowScope
 import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
-import com.sun.jna.Native
-import com.sun.jna.platform.win32.User32
-import com.sun.jna.platform.win32.WinDef.HWND
-import com.sun.jna.platform.win32.WinUser
 import dev.legendsayantan.backstage.core.BackStageEngine
-import dev.legendsayantan.backstage.core.platform.Platform
 import dev.legendsayantan.backstage.core.platform.PlatformContext
-import dev.legendsayantan.backstage.core.platform.currentPlatform
 import dev.legendsayantan.backstage.ui.theme.AccentPrimary
 import dev.legendsayantan.backstage.ui.theme.BgBase
 import dev.legendsayantan.backstage.ui.theme.BgSurfaceHover
@@ -82,7 +76,6 @@ fun main() {
     println("[BackStage] Initializing Compose application window...")
     application {
         val windowState = rememberWindowState(
-            position = WindowPosition.Aligned(Alignment.Center),
             size = DpSize(1080.dp, 680.dp),
         )
         val appIcon = remember { BackStageIconPainter() }
@@ -101,55 +94,13 @@ fun main() {
             fun surfaceWindow() {
                 java.awt.EventQueue.invokeLater {
                     try {
-                        window.isVisible = true
                         if (window.extendedState and java.awt.Frame.ICONIFIED != 0) {
                             window.extendedState = java.awt.Frame.NORMAL
                         }
                         window.isAlwaysOnTop = true
                         window.toFront()
                         window.requestFocus()
-                        window.repaint()
-
-                        // Pulse always-on-top for 1.5 seconds so the window is guaranteed to be above background terminals
-                        javax.swing.Timer(1500) {
-                            try {
-                                window.isAlwaysOnTop = false
-                            } catch (_: Throwable) {}
-                        }.apply {
-                            isRepeats = false
-                            start()
-                        }
-
-                        if (currentPlatform() == Platform.WINDOWS) {
-                            val hwndPtr = Native.getWindowPointer(window)
-                            if (hwndPtr != null) {
-                                val hwnd = HWND(hwndPtr)
-                                val user32 = User32.INSTANCE
-                                val gwlExStyle = -20
-                                val wsExAppWindow = 0x00040000
-                                val swRestore = 9
-                                val swpFrameFlags = 0x0001 or 0x0002 or 0x0004 or 0x0020 // NOSIZE | NOMOVE | NOZORDER | FRAMECHANGED
-
-                                // 1. Add WS_EX_APPWINDOW and notify OS Shell to show window in Taskbar / Alt-Tab
-                                val exStyle = user32.GetWindowLong(hwnd, gwlExStyle)
-                                user32.SetWindowLong(hwnd, gwlExStyle, exStyle or wsExAppWindow)
-                                user32.SetWindowPos(hwnd, null, 0, 0, 0, 0, swpFrameFlags)
-
-                                // 2. Restore window if minimized and bring to foreground
-                                user32.ShowWindow(hwnd, swRestore)
-                                user32.SetForegroundWindow(hwnd)
-                                user32.BringWindowToTop(hwnd)
-
-                                val rect = com.sun.jna.platform.win32.WinDef.RECT()
-                                user32.GetWindowRect(hwnd, rect)
-                                val isWinVis = user32.IsWindowVisible(hwnd)
-                                val winStyle = user32.GetWindowLong(hwnd, -16)
-                                val winExStyle = user32.GetWindowLong(hwnd, -20)
-                                println("[BackStage] Native HWND: $hwndPtr | Rect: [${rect.left}, ${rect.top} to ${rect.right}, ${rect.bottom}] (w=${rect.right - rect.left}, h=${rect.bottom - rect.top}) | Visible: $isWinVis | Style: 0x${Integer.toHexString(winStyle)} | ExStyle: 0x${Integer.toHexString(winExStyle)}")
-                            }
-                        }
-
-                        println("[BackStage] Window state: isVisible=${window.isVisible}, isShowing=${window.isShowing}, bounds=[x=${window.x}, y=${window.y}, w=${window.width}, h=${window.height}], state=${window.extendedState}")
+                        window.isAlwaysOnTop = false
                     } catch (t: Throwable) {
                         System.err.println("[BackStage] Notice during surfaceWindow: ${t.message}")
                     }
@@ -157,7 +108,7 @@ fun main() {
             }
 
             LaunchedEffect(Unit) {
-                println("[BackStage] First composition rendered, surfacing window...")
+                println("[BackStage] Window composition active, ensuring foreground...")
                 surfaceWindow()
             }
             val isMaximized = windowState.placement == WindowPlacement.Maximized
