@@ -215,21 +215,35 @@ fun BackStageApp(
         fun reloadWorkspaces() {
             if (engine.isUnlocked) {
                 scope.launch(Dispatchers.IO) {
-                    val list = engine.workspaceRepository.findAll()
-                    val grpList = engine.groupRepository.findAll()
-                    withContext(Dispatchers.Main) {
-                        workspaces = list
-                        groups = grpList
+                    try {
+                        val list = engine.workspaceRepository.findAll()
+                        val grpList = engine.groupRepository.findAll()
+                        withContext(Dispatchers.Main) {
+                            workspaces = list
+                            groups = grpList
+                        }
+                        println("[BackStage] Loaded ${list.size} workspaces and ${grpList.size} groups.")
+                        engine.arbiter.refreshStates()
+                    } catch (t: Throwable) {
+                        System.err.println("[BackStage ERROR] reloadWorkspaces failed: ${t.message}")
+                        t.printStackTrace()
                     }
-                    engine.arbiter.refreshStates()
                 }
             }
         }
 
         LaunchedEffect(Unit) {
             if (!isAuthenticated) {
+                println("[BackStage] Prompting for device credential authentication...")
                 isAuthenticating = true
-                val res = engine.authenticateAndUnlock()
+                val res = try {
+                    engine.authenticateAndUnlock()
+                } catch (t: Throwable) {
+                    System.err.println("[BackStage ERROR] authenticateAndUnlock thrown exception: ${t.message}")
+                    t.printStackTrace()
+                    AuthResult.Failure(t.message ?: "Authentication error")
+                }
+                println("[BackStage] Authentication completed with result: $res")
                 isAuthenticating = false
                 when (res) {
                     is AuthResult.Success -> {
@@ -238,8 +252,14 @@ fun BackStageApp(
                         reloadWorkspaces()
                         onBringToFront?.invoke()
                     }
-                    is AuthResult.Failure -> authErrorMessage = res.reason
-                    is AuthResult.Unavailable -> authErrorMessage = "Authentication unavailable."
+                    is AuthResult.Failure -> {
+                        authErrorMessage = res.reason
+                        onBringToFront?.invoke()
+                    }
+                    is AuthResult.Unavailable -> {
+                        authErrorMessage = "Authentication unavailable."
+                        onBringToFront?.invoke()
+                    }
                 }
             } else {
                 reloadWorkspaces()
@@ -270,7 +290,13 @@ fun BackStageApp(
                         scope.launch {
                             isAuthenticating = true
                             authErrorMessage = null
-                            val res = engine.authenticateAndUnlock()
+                            val res = try {
+                                engine.authenticateAndUnlock()
+                            } catch (t: Throwable) {
+                                System.err.println("[BackStage ERROR] authenticateAndUnlock exception: ${t.message}")
+                                t.printStackTrace()
+                                AuthResult.Failure(t.message ?: "Authentication error")
+                            }
                             isAuthenticating = false
                             when (res) {
                                 is AuthResult.Success -> {
@@ -278,8 +304,14 @@ fun BackStageApp(
                                     reloadWorkspaces()
                                     onBringToFront?.invoke()
                                 }
-                                is AuthResult.Failure -> authErrorMessage = res.reason
-                                is AuthResult.Unavailable -> authErrorMessage = "Authentication unavailable."
+                                is AuthResult.Failure -> {
+                                    authErrorMessage = res.reason
+                                    onBringToFront?.invoke()
+                                }
+                                is AuthResult.Unavailable -> {
+                                    authErrorMessage = "Authentication unavailable."
+                                    onBringToFront?.invoke()
+                                }
                             }
                         }
                     },
@@ -543,6 +575,10 @@ private fun DeviceCredentialGateScreen(
     errorMessage: String?,
     onAuthenticateClick: () -> Unit,
 ) {
+    LaunchedEffect(isAuthenticating, errorMessage) {
+        println("[BackStage] Lock screen displayed (authenticating=$isAuthenticating, error=$errorMessage)")
+    }
+
     Box(
         modifier = Modifier.fillMaxSize().padding(32.dp),
         contentAlignment = Alignment.Center,
@@ -629,6 +665,10 @@ private fun DashboardScreen(
     onLoadGroup: (WorkspaceGroup) -> Unit,
     onEvictGroup: (WorkspaceGroup) -> Unit,
 ) {
+    LaunchedEffect(workspaces.size, groups.size) {
+        println("[BackStage] DashboardScreen active: ${workspaces.size} workspaces, ${groups.size} groups.")
+    }
+
     var searchQuery by remember { mutableStateOf("") }
     var selectedStateFilter by remember { mutableStateOf("All") } // All, Active, Archived, Ready
     var selectedGroupId by remember { mutableStateOf<GroupId?>(null) }

@@ -50,8 +50,14 @@ import androidx.compose.ui.window.WindowScope
 import androidx.compose.ui.window.WindowState
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import com.sun.jna.Native
+import com.sun.jna.platform.win32.User32
+import com.sun.jna.platform.win32.WinDef.HWND
+import com.sun.jna.platform.win32.WinUser
 import dev.legendsayantan.backstage.core.BackStageEngine
+import dev.legendsayantan.backstage.core.platform.Platform
 import dev.legendsayantan.backstage.core.platform.PlatformContext
+import dev.legendsayantan.backstage.core.platform.currentPlatform
 import dev.legendsayantan.backstage.ui.theme.AccentPrimary
 import dev.legendsayantan.backstage.ui.theme.BgBase
 import dev.legendsayantan.backstage.ui.theme.BgSurfaceHover
@@ -61,11 +67,19 @@ import dev.legendsayantan.backstage.ui.theme.TextMain
 import dev.legendsayantan.backstage.ui.theme.TextMuted
 
 fun main() {
+    println("[BackStage] Starting BackStage Desktop application...")
+    Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+        System.err.println("[BackStage ERROR] Uncaught exception in thread '${thread.name}':")
+        throwable.printStackTrace()
+    }
+
     val engine = BackStageEngine(PlatformContext())
     Runtime.getRuntime().addShutdownHook(Thread {
+        println("[BackStage] Shutdown hook triggered, closing engine...")
         engine.close()
     })
 
+    println("[BackStage] Initializing Compose application window...")
     application {
         val windowState = rememberWindowState(
             position = WindowPosition.Aligned(Alignment.Center),
@@ -74,6 +88,7 @@ fun main() {
         val appIcon = remember { BackStageIconPainter() }
         Window(
             onCloseRequest = {
+                println("[BackStage] Window close requested.")
                 engine.close()
                 exitApplication()
             },
@@ -85,18 +100,58 @@ fun main() {
         ) {
             fun surfaceWindow() {
                 java.awt.EventQueue.invokeLater {
-                    window.isVisible = true
-                    window.toFront()
-                    window.requestFocus()
-                    // Workaround for Windows focus-stealing prevention
-                    if (!window.isAlwaysOnTop) {
-                        window.isAlwaysOnTop = true
-                        window.isAlwaysOnTop = false
+                    try {
+                        window.isVisible = true
+                        window.toFront()
+                        window.requestFocus()
+
+                        if (currentPlatform() == Platform.WINDOWS) {
+                            val hwndPtr = Native.getWindowPointer(window)
+                            if (hwndPtr != null) {
+                                val hwnd = HWND(hwndPtr)
+                                val user32 = User32.INSTANCE
+                                val kernel32 = com.sun.jna.platform.win32.Kernel32.INSTANCE
+                                val gwlExStyle = -20
+                                val wsExAppWindow = 0x00040000
+                                val swShow = 5
+                                val swpFlags = 0x0001 or 0x0002 or 0x0020 or 0x0040 // NOSIZE | NOMOVE | FRAMECHANGED | SHOWWINDOW
+                                val hwndTopmost = HWND(com.sun.jna.Pointer.createConstant(-1L))
+                                val hwndNoTopmost = HWND(com.sun.jna.Pointer.createConstant(-2L))
+
+                                // 1. Add WS_EX_APPWINDOW and notify OS Shell to show window in Taskbar / Alt-Tab
+                                val exStyle = user32.GetWindowLong(hwnd, gwlExStyle)
+                                user32.SetWindowLong(hwnd, gwlExStyle, exStyle or wsExAppWindow)
+                                user32.SetWindowPos(hwnd, null, 0, 0, 0, 0, swpFlags)
+
+                                // 2. Attach input thread to current foreground window to bypass Windows focus-stealing prevention
+                                val fgHwnd = user32.GetForegroundWindow()
+                                val fgThreadId = if (fgHwnd != null) user32.GetWindowThreadProcessId(fgHwnd, null) else 0
+                                val curThreadId = kernel32.GetCurrentThreadId()
+
+                                if (fgThreadId != 0 && fgThreadId != curThreadId) {
+                                    user32.AttachThreadInput(com.sun.jna.platform.win32.WinDef.DWORD(curThreadId.toLong()), com.sun.jna.platform.win32.WinDef.DWORD(fgThreadId.toLong()), true)
+                                }
+
+                                user32.SetWindowPos(hwnd, hwndTopmost, 0, 0, 0, 0, swpFlags)
+                                user32.ShowWindow(hwnd, swShow)
+                                user32.SetForegroundWindow(hwnd)
+                                user32.BringWindowToTop(hwnd)
+                                user32.SetWindowPos(hwnd, hwndNoTopmost, 0, 0, 0, 0, swpFlags)
+
+                                if (fgThreadId != 0 && fgThreadId != curThreadId) {
+                                    user32.AttachThreadInput(com.sun.jna.platform.win32.WinDef.DWORD(curThreadId.toLong()), com.sun.jna.platform.win32.WinDef.DWORD(fgThreadId.toLong()), false)
+                                }
+                                println("[BackStage] Window successfully surfaced to foreground (HWND: $hwndPtr).")
+                            }
+                        }
+                    } catch (t: Throwable) {
+                        System.err.println("[BackStage] Notice during surfaceWindow: ${t.message}")
                     }
                 }
             }
 
             LaunchedEffect(Unit) {
+                println("[BackStage] First composition rendered, surfacing window...")
                 surfaceWindow()
             }
             val isMaximized = windowState.placement == WindowPlacement.Maximized
