@@ -192,7 +192,10 @@ private fun buildVaultBackendForPath(
 }
 
 @Composable
-fun BackStageApp(engine: BackStageEngine) {
+fun BackStageApp(
+    engine: BackStageEngine,
+    onBringToFront: (() -> Unit)? = null,
+) {
     BackStageTheme {
         val scope = rememberCoroutineScope()
         var isAuthenticated by remember { mutableStateOf(engine.isUnlocked) }
@@ -233,16 +236,21 @@ fun BackStageApp(engine: BackStageEngine) {
                         isAuthenticated = true
                         authErrorMessage = null
                         reloadWorkspaces()
+                        onBringToFront?.invoke()
                     }
                     is AuthResult.Failure -> authErrorMessage = res.reason
                     is AuthResult.Unavailable -> authErrorMessage = "Authentication unavailable."
                 }
             } else {
                 reloadWorkspaces()
+                onBringToFront?.invoke()
             }
         }
 
         LaunchedEffect(isAuthenticated) {
+            if (isAuthenticated) {
+                onBringToFront?.invoke()
+            }
             if (isAuthenticated && engine.isUnlocked) {
                 engine.lifecycleDaemon.prefetchFailures.collect { failure ->
                     bannerFeedback = "Could not stage '${failure.displayName}': ${failure.errorMessage}"
@@ -268,6 +276,7 @@ fun BackStageApp(engine: BackStageEngine) {
                                 is AuthResult.Success -> {
                                     isAuthenticated = true
                                     reloadWorkspaces()
+                                    onBringToFront?.invoke()
                                 }
                                 is AuthResult.Failure -> authErrorMessage = res.reason
                                 is AuthResult.Unavailable -> authErrorMessage = "Authentication unavailable."
@@ -646,49 +655,54 @@ private fun DashboardScreen(
         groups.firstOrNull { it.id == selectedGroupId }
     }
 
-    val volumeStats = remember(workspaces) {
-        val workspacePaths = workspaces.flatMap { ws ->
-            val localPath = ws.resolvedLocalPath().trim()
-            val vaultPath = when (val backend = ws.vaultBackend) {
-                is VaultBackendConfig.LocalPath,
-                is VaultBackendConfig.MountedDrive -> resolveVaultDirPath(backend).trim()
-                is VaultBackendConfig.ExternalDrive -> {
-                    val raw = backend.relativePath.trim()
-                    if (File(raw).isAbsolute) {
-                        raw
-                    } else {
-                        runCatching {
-                            MountedDriveDetector.discoverMountedVolumes(currentPlatform())
-                                .firstOrNull { vol ->
-                                    backend.driveLabel.isNotBlank() &&
-                                        vol.name.contains(backend.driveLabel, ignoreCase = true)
-                                }?.mountPoint?.absolutePath.orEmpty()
-                        }.getOrDefault("")
-                    }
-                }
-                is VaultBackendConfig.S3Compatible,
-                is VaultBackendConfig.WebDav -> ""
-            }
-            listOf(localPath, vaultPath).filter { it.isNotBlank() && File(it).isAbsolute }
-        }
+    var volumeStats by remember { mutableStateOf<List<Triple<String, Int, Int>>>(emptyList()) }
 
-        workspacePaths
-            .mapNotNull { pathStr ->
-                val target = File(pathStr)
-                val probeDir = generateSequence(target) { it.parentFile }.firstOrNull { it.exists() }
-                    ?: return@mapNotNull null
-                if (probeDir.totalSpace <= 0L) return@mapNotNull null
-                val root = generateSequence(target) { it.parentFile }.last()
-                val rootLabel = root.path.trimEnd('\\', '/').ifEmpty { "/" }
-                rootLabel to probeDir
+    LaunchedEffect(workspaces) {
+        val stats = withContext(Dispatchers.IO) {
+            val workspacePaths = workspaces.flatMap { ws ->
+                val localPath = ws.resolvedLocalPath().trim()
+                val vaultPath = when (val backend = ws.vaultBackend) {
+                    is VaultBackendConfig.LocalPath,
+                    is VaultBackendConfig.MountedDrive -> resolveVaultDirPath(backend).trim()
+                    is VaultBackendConfig.ExternalDrive -> {
+                        val raw = backend.relativePath.trim()
+                        if (File(raw).isAbsolute) {
+                            raw
+                        } else {
+                            runCatching {
+                                MountedDriveDetector.discoverMountedVolumes(currentPlatform())
+                                    .firstOrNull { vol ->
+                                        backend.driveLabel.isNotBlank() &&
+                                            vol.name.contains(backend.driveLabel, ignoreCase = true)
+                                    }?.mountPoint?.absolutePath.orEmpty()
+                            }.getOrDefault("")
+                        }
+                    }
+                    is VaultBackendConfig.S3Compatible,
+                    is VaultBackendConfig.WebDav -> ""
+                }
+                listOf(localPath, vaultPath).filter { it.isNotBlank() && File(it).isAbsolute }
             }
-            .distinctBy { it.first.uppercase() }
-            .sortedBy { it.first.uppercase() }
-            .map { (rootLabel, probeDir) ->
-                val totalGb = (probeDir.totalSpace / (1024.0 * 1024.0 * 1024.0)).toInt().coerceAtLeast(1)
-                val usedGb = ((probeDir.totalSpace - probeDir.usableSpace) / (1024.0 * 1024.0 * 1024.0)).toInt()
-                Triple(rootLabel, usedGb, totalGb)
-            }
+
+            workspacePaths
+                .mapNotNull { pathStr ->
+                    val target = File(pathStr)
+                    val probeDir = generateSequence(target) { it.parentFile }.firstOrNull { it.exists() }
+                        ?: return@mapNotNull null
+                    if (probeDir.totalSpace <= 0L) return@mapNotNull null
+                    val root = generateSequence(target) { it.parentFile }.last()
+                    val rootLabel = root.path.trimEnd('\\', '/').ifEmpty { "/" }
+                    rootLabel to probeDir
+                }
+                .distinctBy { it.first.uppercase() }
+                .sortedBy { it.first.uppercase() }
+                .map { (rootLabel, probeDir) ->
+                    val totalGb = (probeDir.totalSpace / (1024.0 * 1024.0 * 1024.0)).toInt().coerceAtLeast(1)
+                    val usedGb = ((probeDir.totalSpace - probeDir.usableSpace) / (1024.0 * 1024.0 * 1024.0)).toInt()
+                    Triple(rootLabel, usedGb, totalGb)
+                }
+        }
+        volumeStats = stats
     }
 
     Column(
@@ -875,7 +889,7 @@ private fun DashboardScreen(
                             }
                             Spacer(modifier = Modifier.height(6.dp))
                             LinearProgressIndicator(
-                                progress = { (usedSpaceGb.toFloat() / totalSpaceGb.toFloat()).coerceIn(0f, 1f) },
+                                progress = (usedSpaceGb.toFloat() / totalSpaceGb.toFloat()).coerceIn(0f, 1f),
                                 color = AccentPrimary,
                                 trackColor = BgBase,
                                 modifier = Modifier.fillMaxWidth().height(4.dp).clip(RoundedCornerShape(2.dp)),
@@ -1353,7 +1367,7 @@ private fun WorkspaceCard(
                     )
                 } else {
                     LinearProgressIndicator(
-                        progress = { animatedProgress },
+                        progress = animatedProgress,
                         color = AccentPrimary,
                         trackColor = BgBase,
                         modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),
@@ -3409,7 +3423,7 @@ private fun SwapProgressHud(
                         )
                     } else {
                         LinearProgressIndicator(
-                            progress = { animatedProgress },
+                            progress = animatedProgress,
                             color = AccentPrimary,
                             trackColor = BgBase,
                             modifier = Modifier
