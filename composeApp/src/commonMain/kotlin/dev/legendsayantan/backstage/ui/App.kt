@@ -77,6 +77,7 @@ import dev.legendsayantan.backstage.core.error.BackStageException
 import dev.legendsayantan.backstage.core.io.FolderLock
 import dev.legendsayantan.backstage.core.io.LauncherGenerator
 import dev.legendsayantan.backstage.core.platform.SecureRandomProvider
+import dev.legendsayantan.backstage.core.platform.Platform
 import dev.legendsayantan.backstage.core.platform.currentPlatform
 import dev.legendsayantan.backstage.core.workspace.AuditEventType
 import dev.legendsayantan.backstage.core.workspace.AuditLogEntry
@@ -699,48 +700,89 @@ private fun DashboardScreen(
 
     LaunchedEffect(workspaces) {
         val stats = withContext(Dispatchers.IO) {
-            val workspacePaths = workspaces.flatMap { ws ->
-                val localPath = ws.resolvedLocalPath().trim()
-                val vaultPath = when (val backend = ws.vaultBackend) {
-                    is VaultBackendConfig.LocalPath,
-                    is VaultBackendConfig.MountedDrive -> resolveVaultDirPath(backend).trim()
-                    is VaultBackendConfig.ExternalDrive -> {
-                        val raw = backend.relativePath.trim()
-                        if (File(raw).isAbsolute) {
-                            raw
-                        } else {
-                            runCatching {
-                                MountedDriveDetector.discoverMountedVolumes(currentPlatform())
-                                    .firstOrNull { vol ->
-                                        backend.driveLabel.isNotBlank() &&
-                                            vol.name.contains(backend.driveLabel, ignoreCase = true)
-                                    }?.mountPoint?.absolutePath.orEmpty()
-                            }.getOrDefault("")
-                        }
-                    }
-                    is VaultBackendConfig.S3Compatible,
-                    is VaultBackendConfig.WebDav -> ""
-                }
-                listOf(localPath, vaultPath).filter { it.isNotBlank() && File(it).isAbsolute }
+            val platform = currentPlatform()
+            val mountedCloudVolumes = runCatching {
+                MountedDriveDetector.discoverMountedVolumes(platform)
+            }.getOrDefault(emptyList()).filter { it.isCloudMount || it.driveType != null }
+
+            val mountedRoots = mountedCloudVolumes.map {
+                runCatching { it.mountPoint.canonicalPath.lowercase() }
+                    .getOrDefault(it.mountPoint.absolutePath.lowercase())
+            }.toSet()
+
+            val defaultSystemPath = if (platform == Platform.WINDOWS) {
+                System.getenv("SystemDrive")?.trimEnd('\\', '/') ?: "C:"
+            } else {
+                System.getProperty("user.home").orEmpty().ifBlank { "/" }
             }
 
-            workspacePaths
+            // Only inspect local active workspace paths (never cold vault storage / mounted drives)
+            val candidatePaths = workspaces
+                .map { it.resolvedLocalPath().trim() }
+                .filter { it.isNotBlank() && File(it).isAbsolute }
+                .ifEmpty { listOf(defaultSystemPath) }
+
+            val validVolumes = candidatePaths
                 .mapNotNull { pathStr ->
                     val target = File(pathStr)
                     val probeDir = generateSequence(target) { it.parentFile }.firstOrNull { it.exists() }
                         ?: return@mapNotNull null
                     if (probeDir.totalSpace <= 0L) return@mapNotNull null
                     val root = generateSequence(target) { it.parentFile }.last()
+
+                    // Exclude network / UNC paths
+                    if (root.path.startsWith("\\\\")) return@mapNotNull null
+
+                    // Exclude mounted cloud / virtual drives
+                    val canonical = runCatching { probeDir.canonicalPath.lowercase() }
+                        .getOrDefault(probeDir.absolutePath.lowercase())
+                    if (mountedRoots.any { canonical == it || canonical.startsWith("$it\\") || canonical.startsWith("$it/") }) {
+                        return@mapNotNull null
+                    }
+
+                    // Check FileStore name and type for virtual / cloud filesystems
+                    val store = runCatching { java.nio.file.Files.getFileStore(probeDir.toPath()) }.getOrNull()
+                    if (store != null) {
+                        val name = runCatching { store.name().lowercase() }.getOrDefault("")
+                        val type = runCatching { store.type().lowercase() }.getOrDefault("")
+                        val isCloudOrVirtual = name.contains("google drive") ||
+                            name.contains("onedrive") ||
+                            name.contains("dropbox") ||
+                            name.contains("icloud") ||
+                            name.contains("nextcloud") ||
+                            type.contains("winfsp") ||
+                            type.contains("rclone") ||
+                            type.contains("fuse") ||
+                            type.contains("davfs") ||
+                            type.contains("cifs") ||
+                            type.contains("smb") ||
+                            type.contains("nfs")
+                        if (isCloudOrVirtual) return@mapNotNull null
+                    }
+
                     val rootLabel = root.path.trimEnd('\\', '/').ifEmpty { "/" }
                     rootLabel to probeDir
                 }
                 .distinctBy { it.first.uppercase() }
                 .sortedBy { it.first.uppercase() }
-                .map { (rootLabel, probeDir) ->
-                    val totalGb = (probeDir.totalSpace / (1024.0 * 1024.0 * 1024.0)).toInt().coerceAtLeast(1)
-                    val usedGb = ((probeDir.totalSpace - probeDir.usableSpace) / (1024.0 * 1024.0 * 1024.0)).toInt()
-                    Triple(rootLabel, usedGb, totalGb)
-                }
+
+            val finalVolumes = if (validVolumes.isEmpty()) {
+                val fallbackTarget = File(defaultSystemPath)
+                val fallbackProbe = generateSequence(fallbackTarget) { it.parentFile }.firstOrNull { it.exists() }
+                if (fallbackProbe != null && fallbackProbe.totalSpace > 0L) {
+                    val root = generateSequence(fallbackTarget) { it.parentFile }.last()
+                    val rootLabel = root.path.trimEnd('\\', '/').ifEmpty { "/" }
+                    listOf(rootLabel to fallbackProbe)
+                } else emptyList()
+            } else {
+                validVolumes
+            }
+
+            finalVolumes.map { (rootLabel, probeDir) ->
+                val totalGb = (probeDir.totalSpace / (1024.0 * 1024.0 * 1024.0)).toInt().coerceAtLeast(1)
+                val usedGb = ((probeDir.totalSpace - probeDir.usableSpace) / (1024.0 * 1024.0 * 1024.0)).toInt()
+                Triple(rootLabel, usedGb, totalGb)
+            }
         }
         volumeStats = stats
     }

@@ -19,12 +19,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CornerSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.window.WindowDraggableArea
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -61,6 +60,7 @@ import dev.legendsayantan.backstage.ui.theme.TextMain
 import dev.legendsayantan.backstage.ui.theme.TextMuted
 
 fun main() {
+    System.setProperty("skiko.renderApi.logging", "true")
     println("[BackStage] Starting BackStage Desktop application...")
     Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
         System.err.println("[BackStage ERROR] Uncaught exception in thread '${thread.name}':")
@@ -76,6 +76,7 @@ fun main() {
     println("[BackStage] Initializing Compose application window...")
     application {
         val windowState = rememberWindowState(
+            position = WindowPosition.Aligned(Alignment.Center),
             size = DpSize(1080.dp, 680.dp),
         )
         val appIcon = remember { BackStageIconPainter() }
@@ -89,18 +90,50 @@ fun main() {
             icon = appIcon,
             undecorated = true,
             transparent = false,
+            visible = true,
             state = windowState,
         ) {
+            val topmostResetTimer = remember(window) {
+                javax.swing.Timer(1500) {
+                    try {
+                        window.isAlwaysOnTop = false
+                    } catch (_: Throwable) {
+                        // The window may already be disposed during application shutdown.
+                    }
+                }.apply {
+                    isRepeats = false
+                }
+            }
+
+            DisposableEffect(window) {
+                onDispose {
+                    topmostResetTimer.stop()
+                    runCatching { window.isAlwaysOnTop = false }
+                }
+            }
+
             fun surfaceWindow() {
                 java.awt.EventQueue.invokeLater {
                     try {
+                        // Compose Desktop shows a Window on a later AWT tick. This callback can
+                        // otherwise run first, making toFront() a no-op against a hidden frame.
+                        window.isVisible = true
                         if (window.extendedState and java.awt.Frame.ICONIFIED != 0) {
                             window.extendedState = java.awt.Frame.NORMAL
                         }
                         window.isAlwaysOnTop = true
                         window.toFront()
                         window.requestFocus()
-                        window.isAlwaysOnTop = false
+                        window.repaint()
+
+                        // Keep the topmost state across at least one paint/activation cycle.
+                        // Resetting it in this same event (the old behavior) races Windows' z-order
+                        // processing and can leave the undecorated window behind the launcher.
+                        topmostResetTimer.restart()
+                        println(
+                            "[BackStage] Window surfaced: visible=${window.isVisible}, " +
+                                "showing=${window.isShowing}, bounds=${window.bounds}",
+                        )
                     } catch (t: Throwable) {
                         System.err.println("[BackStage] Notice during surfaceWindow: ${t.message}")
                     }
