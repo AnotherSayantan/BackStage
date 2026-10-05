@@ -90,6 +90,8 @@ compose.desktop {
             description = "Cross-Platform Encrypted Workspace Lifecycle Manager"
             vendor = "LegendSayantan"
 
+            modules("java.sql", "java.naming", "java.management", "java.instrument", "jdk.unsupported")
+
             windows {
                 menuGroup = "BackStage"
                 shortcut = true
