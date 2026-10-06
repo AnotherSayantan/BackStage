@@ -93,6 +93,17 @@ fun main() {
             visible = true,
             state = windowState,
         ) {
+            LaunchedEffect(window) {
+                runCatching {
+                    val stream = Thread.currentThread().contextClassLoader.getResourceAsStream("icon.png")
+                    stream?.use {
+                        val img = javax.imageio.ImageIO.read(it)
+                        if (img != null) {
+                            window.iconImages = listOf(img)
+                        }
+                    }
+                }
+            }
             val topmostResetTimer = remember(window) {
                 javax.swing.Timer(1500) {
                     try {

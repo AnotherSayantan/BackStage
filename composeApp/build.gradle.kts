@@ -95,10 +95,12 @@ compose.desktop {
             windows {
                 menuGroup = "BackStage"
                 shortcut = true
+                iconFile.set(project.file("src/desktopMain/resources/icon.ico"))
             }
             linux {
                 shortcut = true
                 packageName = "backstage"
+                iconFile.set(project.file("src/desktopMain/resources/icon.png"))
             }
         }
     }
