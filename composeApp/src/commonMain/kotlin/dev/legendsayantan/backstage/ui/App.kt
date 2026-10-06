@@ -797,14 +797,14 @@ private fun DashboardScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Row(
-                verticalAlignment = Alignment.Bottom,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
                     text = "Workspaces",
                     fontSize = 22.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = TextMain,
+                    modifier = Modifier.alignByBaseline(),
                 )
                 if (workspaces.isNotEmpty()) {
                     val activeCount = workspaces.count { (states[it.id] ?: WorkspaceState.Vaulted) is WorkspaceState.Active }
@@ -817,7 +817,7 @@ private fun DashboardScreen(
                         },
                         fontSize = 12.sp,
                         color = TextMuted,
-                        modifier = Modifier.padding(bottom = 3.dp),
+                        modifier = Modifier.alignByBaseline(),
                     )
                 }
             }
