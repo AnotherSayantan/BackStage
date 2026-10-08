@@ -30,6 +30,8 @@ sealed interface WorkspaceKeyMode {
 }
 
 enum class PasswordReason {
+    /** Initial encryption password required when creating a new vault for a workspace. */
+    INITIAL_CREATION,
     /** Workspace is known or being imported on a device that does not yet have its vault_key in OS keystore. */
     NEW_DEVICE,
     /** Stored vault_key failed BLAKE3 HEADER_MAC check because the vault key was rotated on another device. */

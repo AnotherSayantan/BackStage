@@ -496,6 +496,29 @@ fun BackStageApp(
                                         // show it as Active without archiving the content away.
                                         withContext(Dispatchers.IO) {
                                             FolderLock.writeLock(localDir, created.id)
+                                            if (initialPassword != null && created.vaultFormat.isEncrypted) {
+                                                runCatching {
+                                                    val initMaterial = engine.passwordVerifier.initializeWorkspaceKey(created, initialPassword)
+                                                    val backend = dev.legendsayantan.backstage.core.backend.VaultBackendFactory.create(created.vaultBackend)
+                                                    val sidecarName = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.sidecarFileName(created.vaultFileName)
+                                                    val macCover = initMaterial.argon2Salt + initMaterial.wrappedKey
+                                                    val headerMac = dev.legendsayantan.backstage.core.crypto.Blake3.keyedHash(macCover, initMaterial.vaultKey)
+                                                    val sidecar = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar(
+                                                        workspaceId = created.id.value,
+                                                        displayName = created.displayName,
+                                                        platformOrigin = created.platformOrigin,
+                                                        vaultFormat = created.vaultFormat.fileExtension,
+                                                        archiveFilename = created.vaultFileName,
+                                                        passwordHint = (created.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
+                                                        headerMacHex = headerMac.toHexString(),
+                                                        kdf = dev.legendsayantan.backstage.core.crypto.BsmetaKdfInfo(
+                                                            saltHex = initMaterial.argon2Salt.toHexString(),
+                                                            wrappedKeyHex = initMaterial.wrappedKey.toHexString(),
+                                                        )
+                                                    )
+                                                    backend.writeAllBytes(sidecarName, dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.encode(sidecar).encodeToByteArray())
+                                                }
+                                            }
                                         }
                                         bannerFeedback = "Created '${created.displayName}'"
                                         reloadWorkspaces()
@@ -2119,22 +2142,70 @@ private fun WorkspaceSettingsScreen(
                                     scope.launch {
                                         runCatching {
                                             val backend = dev.legendsayantan.backstage.core.backend.VaultBackendFactory.create(currentConfig.vaultBackend)
-                                            engine.passwordChanger.changePassword(
-                                                workspace = currentConfig,
-                                                newPassword = newPasswordInput,
-                                                newPasswordHint = passwordHint.ifBlank { null },
-                                                backend = backend,
-                                            )
+                                            val localTarget = File(currentConfig.resolvedLocalPath())
+                                            val isLocalActive = localTarget.isDirectory && (FolderLock.readLock(localTarget) != null || (localTarget.listFiles()?.isNotEmpty() == true))
+                                            val vaultExists = backend.exists(currentConfig.vaultFileName)
+
+                                            if (!isLocalActive && vaultExists && !hasStoredKeyInOsKeystore) {
+                                                onFeedback("Please restore '${currentConfig.displayName}' with your current password first.")
+                                                return@launch
+                                            }
+
+                                            if (!hasStoredKeyInOsKeystore && (isLocalActive || !vaultExists)) {
+                                                // Initialize fresh key material and persist into keystore
+                                                val initMaterial = engine.passwordVerifier.initializeWorkspaceKey(
+                                                    workspace = currentConfig,
+                                                    password = newPasswordInput,
+                                                )
+                                                if (!askPasswordEveryTime) {
+                                                    engine.keyProvider.store(keystoreAlias, initMaterial.vaultKey)
+                                                }
+                                                if (vaultExists && isLocalActive) {
+                                                    // User reset forgotten password on active workspace: purge old stale vault
+                                                    runCatching { backend.delete(currentConfig.vaultFileName) }
+                                                    runCatching { backend.delete(dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.sidecarFileName(currentConfig.vaultFileName)) }
+                                                }
+                                                // Write initial .bsmeta sidecar so password hint and MAC are preserved
+                                                val sidecarName = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.sidecarFileName(currentConfig.vaultFileName)
+                                                val macCover = initMaterial.argon2Salt + initMaterial.wrappedKey
+                                                val headerMac = dev.legendsayantan.backstage.core.crypto.Blake3.keyedHash(macCover, initMaterial.vaultKey)
+                                                val sidecar = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar(
+                                                    workspaceId = currentConfig.id.value,
+                                                    displayName = currentConfig.displayName,
+                                                    platformOrigin = currentConfig.platformOrigin,
+                                                    vaultFormat = currentConfig.vaultFormat.fileExtension,
+                                                    archiveFilename = currentConfig.vaultFileName,
+                                                    passwordHint = passwordHint.ifBlank { null },
+                                                    headerMacHex = headerMac.toHexString(),
+                                                    kdf = dev.legendsayantan.backstage.core.crypto.BsmetaKdfInfo(
+                                                        saltHex = initMaterial.argon2Salt.toHexString(),
+                                                        wrappedKeyHex = initMaterial.wrappedKey.toHexString(),
+                                                    )
+                                                )
+                                                backend.writeAllBytes(sidecarName, dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.encode(sidecar).encodeToByteArray())
+                                            } else {
+                                                engine.passwordChanger.changePassword(
+                                                    workspace = currentConfig,
+                                                    newPassword = newPasswordInput,
+                                                    newPasswordHint = passwordHint.ifBlank { null },
+                                                    backend = backend,
+                                                )
+                                            }
                                             val updatedKeyMode = when (val km = currentConfig.keyMode) {
                                                 is WorkspaceKeyMode.PasswordBacked -> km.copy(passwordHint = passwordHint.ifBlank { null })
                                                 WorkspaceKeyMode.ManualOnEveryUse -> WorkspaceKeyMode.ManualOnEveryUse
-                                                null -> null
+                                                null -> WorkspaceKeyMode.PasswordBacked(
+                                                    keystoreAlias = keystoreAlias,
+                                                    passwordHint = passwordHint.ifBlank { null },
+                                                )
                                             }
                                             val updated = currentConfig.copy(keyMode = updatedKeyMode)
                                             engine.workspaceRepository.upsert(updated)
                                             currentConfig = updated
                                             newPasswordInput = ""
-                                            onFeedback("Password updated.")
+                                            val hadKeyBefore = hasStoredKeyInOsKeystore
+                                            hasStoredKeyInOsKeystore = engine.keyProvider.exists(keystoreAlias)
+                                            onFeedback(if (hadKeyBefore) "Password updated." else "Password set.")
                                         }.onFailure {
                                             onFeedback("Could not update password: ${formatUserFriendlyError(it)}")
                                         }
@@ -2146,7 +2217,7 @@ private fun WorkspaceSettingsScreen(
                                     contentColor = Color(0xFF12100B),
                                 ),
                             ) {
-                                Text("Update Password", fontWeight = FontWeight.SemiBold)
+                                Text(if (hasStoredKeyInOsKeystore) "Update Password" else "Set Password", fontWeight = FontWeight.SemiBold)
                             }
 
                             if (currentConfig.vaultFormat == VaultFormatConfig.Native) {
@@ -2503,11 +2574,16 @@ private fun PasswordPromptDialog(
 ) {
     val scope = rememberCoroutineScope()
     var password by remember { mutableStateOf("") }
+    var confirmPassword by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
     var isVerifying by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
+    val isInitialCreation = prompt.needsPassword.reason == PasswordReason.INITIAL_CREATION
+
     val reasonDescription = when (prompt.needsPassword.reason) {
+        PasswordReason.INITIAL_CREATION ->
+            "Set a password for '${prompt.workspace.displayName}' to encrypt it before archiving."
         PasswordReason.NEW_DEVICE ->
             "Enter the password for '${prompt.workspace.displayName}' to unlock it on this device."
         PasswordReason.ALWAYS_REQUIRED ->
@@ -2518,24 +2594,34 @@ private fun PasswordPromptDialog(
 
     BackStageModalDialog(
         glyph = GlyphType.LOCK,
-        title = "Unlock Workspace",
+        title = if (isInitialCreation) "Set Workspace Password" else "Unlock Workspace",
         subtitle = prompt.workspace.displayName,
         width = 460.dp,
         onDismissRequest = onCancel,
         dismissEnabled = !isVerifying,
-        confirmButtonText = if (isVerifying) "Unlocking..." else "Unlock",
-        confirmEnabled = !isVerifying && password.isNotEmpty(),
+        confirmButtonText = if (isVerifying) (if (isInitialCreation) "Saving..." else "Unlocking...") else if (isInitialCreation) "Save Password & Archive" else "Unlock",
+        confirmEnabled = !isVerifying && password.isNotEmpty() && (!isInitialCreation || (confirmPassword.isNotEmpty() && password == confirmPassword)),
         onConfirm = {
             scope.launch {
                 isVerifying = true
                 errorMessage = null
-                val verifiedKey = engine.passwordVerifier.verify(password, prompt.needsPassword)
-                isVerifying = false
-                if (verifiedKey != null) {
-                    verifiedKey.fill(0)
+                if (isInitialCreation) {
+                    if (password != confirmPassword) {
+                        errorMessage = "Passwords do not match."
+                        isVerifying = false
+                        return@launch
+                    }
+                    isVerifying = false
                     onVerified(password)
                 } else {
-                    errorMessage = "Incorrect password."
+                    val verifiedKey = engine.passwordVerifier.verify(password, prompt.needsPassword)
+                    isVerifying = false
+                    if (verifiedKey != null) {
+                        verifiedKey.fill(0)
+                        onVerified(password)
+                    } else {
+                        errorMessage = "Incorrect password."
+                    }
                 }
             }
         },
@@ -2561,7 +2647,7 @@ private fun PasswordPromptDialog(
                 password = it
                 errorMessage = null
             },
-            label = "Password",
+            label = if (isInitialCreation) "New Password" else "Password",
             placeholder = "Enter password...",
             visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
             enabled = !isVerifying,
@@ -2581,8 +2667,32 @@ private fun PasswordPromptDialog(
             },
         )
 
+        if (isInitialCreation) {
+            StyledTextField(
+                value = confirmPassword,
+                onValueChange = {
+                    confirmPassword = it
+                    errorMessage = null
+                },
+                label = "Confirm Password",
+                placeholder = "Repeat password...",
+                visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
+                enabled = !isVerifying,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (confirmPassword.isNotEmpty() && password != confirmPassword) {
+                Text(
+                    text = "Passwords do not match",
+                    color = DangerColor,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
         if (isVerifying) {
             LinearProgressIndicator(
+                progress = { 0.5f },
                 color = AccentPrimary,
                 trackColor = BgBase,
                 modifier = Modifier.fillMaxWidth().height(3.dp).clip(RoundedCornerShape(2.dp)),

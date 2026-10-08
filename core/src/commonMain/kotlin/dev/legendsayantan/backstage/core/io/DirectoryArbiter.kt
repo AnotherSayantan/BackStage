@@ -717,7 +717,10 @@ class DirectoryArbiter(
             )
         }
 
-        if (vaultAlreadyExists) {
+        val sidecarName = BsmetaSidecar.sidecarFileName(workspace.vaultFileName)
+        val hasKeyEnvelope = vaultAlreadyExists || backend.exists(sidecarName)
+
+        if (hasKeyEnvelope) {
             val envelope = passwordVerifier.readKeyEnvelope(workspace, backend)
             val keyState = passwordVerifier.assess(workspace, backend)
             val vaultKey = when (keyState) {
@@ -737,7 +740,7 @@ class DirectoryArbiter(
             val password = passwordOverrideForNewVault
                 ?: passwordCallback?.invoke(
                     VaultKeyState.NeedsPassword(
-                        reason = dev.legendsayantan.backstage.core.crypto.PasswordReason.NEW_DEVICE,
+                        reason = dev.legendsayantan.backstage.core.crypto.PasswordReason.INITIAL_CREATION,
                         hint = (workspace.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
                         argon2Salt = ByteArray(16),
                         wrappedKey = ByteArray(60),

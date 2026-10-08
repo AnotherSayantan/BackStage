@@ -170,22 +170,40 @@ class PasswordVerifier(
 
         return when (workspace.vaultFormat) {
             VaultFormatConfig.Native -> {
-                val tinyBytes = backend.readBytes(
-                    fileName = workspace.vaultFileName,
-                    offset = 0L,
-                    count = TinyHeader.TINY_HEADER_BYTES,
-                )
-                val tiny = TinyHeader.parse(tinyBytes)
-                KeyEnvelope(
-                    argon2Salt = tiny.argon2Salt,
-                    wrappedKey = tiny.wrappedKey,
-                    headerMac = tiny.headerMac,
-                    macCoverBytes = tiny.macCoverBytes,
-                    hintFromSidecar = sidecar?.passwordHint,
-                    argon2MCost = tiny.argon2MCost,
-                    argon2TCost = tiny.argon2TCost,
-                    argon2Parallelism = tiny.argon2Parallelism,
-                )
+                if (!backend.exists(workspace.vaultFileName) && sidecar?.kdf?.wrappedKeyHex != null) {
+                    val kdf = sidecar.kdf
+                    val salt = kdf.saltHex.hexToByteArray()
+                    val wrapped = kdf.wrappedKeyHex.hexToByteArray()
+                    val macCover = salt + wrapped
+                    val headerMac = sidecar.headerMacHex?.hexToByteArray() ?: ByteArray(32)
+                    KeyEnvelope(
+                        argon2Salt = salt,
+                        wrappedKey = wrapped,
+                        headerMac = headerMac,
+                        macCoverBytes = macCover,
+                        hintFromSidecar = sidecar.passwordHint,
+                        argon2MCost = kdf.mCost,
+                        argon2TCost = kdf.tCost,
+                        argon2Parallelism = kdf.parallelism,
+                    )
+                } else {
+                    val tinyBytes = backend.readBytes(
+                        fileName = workspace.vaultFileName,
+                        offset = 0L,
+                        count = TinyHeader.TINY_HEADER_BYTES,
+                    )
+                    val tiny = TinyHeader.parse(tinyBytes)
+                    KeyEnvelope(
+                        argon2Salt = tiny.argon2Salt,
+                        wrappedKey = tiny.wrappedKey,
+                        headerMac = tiny.headerMac,
+                        macCoverBytes = tiny.macCoverBytes,
+                        hintFromSidecar = sidecar?.passwordHint,
+                        argon2MCost = tiny.argon2MCost,
+                        argon2TCost = tiny.argon2TCost,
+                        argon2Parallelism = tiny.argon2Parallelism,
+                    )
+                }
             }
 
             VaultFormatConfig.Portable -> {

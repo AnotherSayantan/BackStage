@@ -86,7 +86,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "BackStage"
-            packageVersion = "0.1.0"
+            packageVersion = "0.1.1"
             description = "Cross-Platform Encrypted Workspace Lifecycle Manager"
             vendor = "LegendSayantan"
 
