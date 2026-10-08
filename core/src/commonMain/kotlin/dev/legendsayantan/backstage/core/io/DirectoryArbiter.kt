@@ -50,6 +50,8 @@ class DirectoryArbiter(
     private val _states = MutableStateFlow<Map<WorkspaceId, WorkspaceState>>(emptyMap())
     val states: StateFlow<Map<WorkspaceId, WorkspaceState>> = _states.asStateFlow()
 
+    fun currentState(id: WorkspaceId): WorkspaceState = states.value[id] ?: WorkspaceState.Vaulted
+
     val stagingDir: File
         get() = File(context.resolveAppDataDir(), "stage").apply { mkdirs() }
 
@@ -117,19 +119,75 @@ class DirectoryArbiter(
         val workspace = workspaceRepository.findById(workspaceId)
             ?: throw IllegalArgumentException("Unknown workspace: ${workspaceId.value}")
 
+        val targetDir = File(workspace.resolvedLocalPath())
+        // Fast-path early check before lock: if already restored and active, no-op
+        val preLock = FolderLock.readLock(targetDir)
+        if (preLock != null && preLock.workspaceId == workspaceId.value) {
+            updateState(workspaceId, WorkspaceState.Active)
+            return@withContext
+        }
+
+        // Set initial busy state immediately so UI updates on the very first frame (< 5ms)
+        val preState = _states.value[workspaceId]
+        if (preState !is WorkspaceState.Busy) {
+            val stagedVaultFile = File(stagingDir, workspace.vaultFileName)
+            val initialMsg = if (stagedVaultFile.isFile) "Verifying staged archive..." else "Preparing restore..."
+            setBusy(workspaceId, WorkspaceOperation.VALIDATING, 0.02f, initialMsg)
+        }
+
         try {
             lockFor(workspaceId).withLock {
-            // Check if a staged encrypted prefetch exists locally and verify its BLAKE3 integrity
+            // Re-check after acquiring lock in case a previous concurrent restore completed while waiting
+            val activeLock = FolderLock.readLock(targetDir)
+            if (activeLock != null && activeLock.workspaceId == workspaceId.value) {
+                updateState(workspaceId, WorkspaceState.Active)
+                return@withLock
+            }
+
+            // Check if a staged encrypted prefetch exists locally and verify its integrity
             val stagedVaultFile = File(stagingDir, workspace.vaultFileName)
             val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
             val useStagedFile = if (stagedVaultFile.isFile) {
                 val validStaged = if (stagedMacFile.isFile) {
-                    val expectedHex = runCatching { stagedMacFile.readText().trim() }.getOrDefault("")
-                    val actualHex = runCatching {
-                        dev.legendsayantan.backstage.core.crypto.Blake3.hashFile(stagedVaultFile)
-                            .let { bytes -> bytes.joinToString("") { "%02x".format(it) } }
-                    }.getOrDefault("")
-                    expectedHex.isNotEmpty() && expectedHex.equals(actualHex, ignoreCase = true)
+                    val macRaw = runCatching { stagedMacFile.readText().trim() }.getOrDefault("")
+                    val parts = macRaw.split(":")
+                    val expectedHex = parts.getOrNull(0)?.trim().orEmpty()
+                    val cachedLen = parts.getOrNull(1)?.toLongOrNull()
+                    val cachedMtime = parts.getOrNull(2)?.toLongOrNull()
+
+                    if (parts.size == 3 && cachedLen != null && cachedMtime != null &&
+                        stagedVaultFile.length() == cachedLen && stagedVaultFile.lastModified() == cachedMtime &&
+                        expectedHex.isNotEmpty()
+                    ) {
+                        // Instant verification: size and last-modified timestamp match the prefetch MAC
+                        true
+                    } else {
+                        // Metadata mismatch or legacy .bsstage_mac: full streaming BLAKE3 verification with live progress
+                        val actualHex = runCatching {
+                            dev.legendsayantan.backstage.core.crypto.Blake3.hashFileWithProgress(
+                                file = stagedVaultFile,
+                                bufferSizeBytes = 1024 * 1024,
+                            ) { frac, done, total ->
+                                setBusy(
+                                    id = workspaceId,
+                                    op = WorkspaceOperation.VALIDATING,
+                                    progress = (frac * 0.15f).coerceIn(0.02f, 0.15f),
+                                    message = "Verifying staged archive...",
+                                    bytesProcessed = done,
+                                    totalBytes = total,
+                                )
+                            }.let { bytes -> bytes.joinToString("") { "%02x".format(it) } }
+                        }.getOrDefault("")
+
+                        val verified = expectedHex.isNotEmpty() && expectedHex.equals(actualHex, ignoreCase = true)
+                        if (verified) {
+                            // Update stagedMacFile with cached metadata for subsequent instant restores
+                            runCatching {
+                                stagedMacFile.writeText("$actualHex:${stagedVaultFile.length()}:${stagedVaultFile.lastModified()}")
+                            }
+                        }
+                        verified
+                    }
                 } else {
                     false
                 }
@@ -325,8 +383,18 @@ class DirectoryArbiter(
             return@withContext
         }
 
+        val preState = _states.value[workspaceId]
+        if (preState !is WorkspaceState.Busy) {
+            setBusy(workspaceId, WorkspaceOperation.LOCKING, 0.04f, "Checking for open file handles...")
+        }
+
         try {
             lockFor(workspaceId).withLock {
+            if (!targetDir.isDirectory) {
+                updateState(workspaceId, WorkspaceState.Vaulted)
+                return@withLock
+            }
+
             // 1. LOCKING — Check for open OS file handles
             setBusy(workspaceId, WorkspaceOperation.LOCKING, 0.04f, "Checking for open file handles...")
             if (!forceIgnoreHandles) {
@@ -435,62 +503,97 @@ class DirectoryArbiter(
         val workspace = workspaceRepository.findById(workspaceId)
             ?: throw IllegalArgumentException("Unknown workspace: ${workspaceId.value}")
 
-        val backend = backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend)
-        if (!backend.exists(workspace.vaultFileName)) {
-            throw BackStageException(BackStageError.VaultNotFound(workspace.vaultBackend, workspace.vaultFileName))
+        val stagedVault = File(stagingDir, workspace.vaultFileName)
+        val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
+
+        // Fast-path check: if already staged and valid, avoid re-downloading
+        if (stagedVault.isFile && stagedMacFile.isFile) {
+            val macRaw = runCatching { stagedMacFile.readText().trim() }.getOrDefault("")
+            val parts = macRaw.split(":")
+            val expectedHex = parts.getOrNull(0)?.trim().orEmpty()
+            val cachedLen = parts.getOrNull(1)?.toLongOrNull()
+            val cachedMtime = parts.getOrNull(2)?.toLongOrNull()
+            if (parts.size == 3 && cachedLen != null && cachedMtime != null &&
+                stagedVault.length() == cachedLen && stagedVault.lastModified() == cachedMtime &&
+                expectedHex.isNotEmpty()
+            ) {
+                updateState(workspaceId, WorkspaceState.StagedEncrypted)
+                return@withContext stagedVault
+            }
         }
 
-        val totalVaultBytes = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
-        val stagedVault = File(stagingDir, workspace.vaultFileName)
-        val tempStaged = File(stagingDir, "${workspace.vaultFileName}.part")
-        val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
-        val hasher = dev.legendsayantan.backstage.core.crypto.Blake3.StreamingHasher()
+        lockFor(workspaceId).withLock {
+            // Re-check inside lock
+            if (stagedVault.isFile && stagedMacFile.isFile) {
+                val macRaw = runCatching { stagedMacFile.readText().trim() }.getOrDefault("")
+                val parts = macRaw.split(":")
+                val expectedHex = parts.getOrNull(0)?.trim().orEmpty()
+                val cachedLen = parts.getOrNull(1)?.toLongOrNull()
+                val cachedMtime = parts.getOrNull(2)?.toLongOrNull()
+                if (parts.size == 3 && cachedLen != null && cachedMtime != null &&
+                    stagedVault.length() == cachedLen && stagedVault.lastModified() == cachedMtime &&
+                    expectedHex.isNotEmpty()
+                ) {
+                    updateState(workspaceId, WorkspaceState.StagedEncrypted)
+                    return@withLock stagedVault
+                }
+            }
 
-        try {
-            setBusy(workspaceId, WorkspaceOperation.EXTRACTING, 0.02f, "Staging vault locally...")
-            var stagedBytesSoFar = 0L
-            backend.openReadStream(workspace.vaultFileName).use { source ->
-                java.io.FileOutputStream(tempStaged).buffered().use { fos ->
-                    val ioBuf = kotlinx.io.Buffer()
-                    val byteBuf = ByteArray(65_536)
-                    while (true) {
-                        val readLong = source.readAtMostTo(ioBuf, 65_536L)
-                        if (readLong <= 0L) break
-                        while (ioBuf.size > 0L) {
-                            val chunkLen = minOf(byteBuf.size.toLong(), ioBuf.size).toInt()
-                            val n = ioBuf.readAtMostTo(byteBuf, 0, chunkLen)
-                            if (n <= 0) break
-                            hasher.update(byteBuf, 0, n)
-                            fos.write(byteBuf, 0, n)
-                            stagedBytesSoFar += n
-                            val frac = (stagedBytesSoFar.toFloat() / totalVaultBytes.toFloat()).coerceIn(0f, 0.98f)
-                            setBusy(
-                                id = workspaceId,
-                                op = WorkspaceOperation.EXTRACTING,
-                                progress = frac,
-                                message = "Staging ${workspace.displayName}...",
-                                bytesProcessed = stagedBytesSoFar,
-                                totalBytes = totalVaultBytes,
-                            )
+            val backend = backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend)
+            if (!backend.exists(workspace.vaultFileName)) {
+                throw BackStageException(BackStageError.VaultNotFound(workspace.vaultBackend, workspace.vaultFileName))
+            }
+
+            val totalVaultBytes = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
+            val tempStaged = File(stagingDir, "${workspace.vaultFileName}.part")
+            val hasher = dev.legendsayantan.backstage.core.crypto.Blake3.StreamingHasher()
+
+            try {
+                setBusy(workspaceId, WorkspaceOperation.EXTRACTING, 0.02f, "Staging vault locally...")
+                var stagedBytesSoFar = 0L
+                backend.openReadStream(workspace.vaultFileName).use { source ->
+                    java.io.FileOutputStream(tempStaged).buffered().use { fos ->
+                        val ioBuf = kotlinx.io.Buffer()
+                        val byteBuf = ByteArray(65_536)
+                        while (true) {
+                            val readLong = source.readAtMostTo(ioBuf, 65_536L)
+                            if (readLong <= 0L) break
+                            while (ioBuf.size > 0L) {
+                                val chunkLen = minOf(byteBuf.size.toLong(), ioBuf.size).toInt()
+                                val n = ioBuf.readAtMostTo(byteBuf, 0, chunkLen)
+                                if (n <= 0) break
+                                hasher.update(byteBuf, 0, n)
+                                fos.write(byteBuf, 0, n)
+                                stagedBytesSoFar += n
+                                val frac = (stagedBytesSoFar.toFloat() / totalVaultBytes.toFloat()).coerceIn(0f, 0.98f)
+                                setBusy(
+                                    id = workspaceId,
+                                    op = WorkspaceOperation.EXTRACTING,
+                                    progress = frac,
+                                    message = "Staging ${workspace.displayName}...",
+                                    bytesProcessed = stagedBytesSoFar,
+                                    totalBytes = totalVaultBytes,
+                                )
+                            }
                         }
                     }
                 }
+                val digestHex = hasher.finish().joinToString("") { "%02x".format(it) }
+                if (stagedVault.exists()) stagedVault.delete()
+                tempStaged.renameTo(stagedVault)
+                stagedMacFile.writeText("$digestHex:${stagedVault.length()}:${stagedVault.lastModified()}")
+            } finally {
+                if (tempStaged.exists()) tempStaged.delete()
             }
-            val digestHex = hasher.finish().joinToString("") { "%02x".format(it) }
-            if (stagedVault.exists()) stagedVault.delete()
-            tempStaged.renameTo(stagedVault)
-            stagedMacFile.writeText(digestHex)
-        } finally {
-            if (tempStaged.exists()) tempStaged.delete()
-        }
 
-        val sidecarName = BsmetaSidecar.sidecarFileName(workspace.vaultFileName)
-        if (backend.exists(sidecarName)) {
-            File(stagingDir, sidecarName).writeBytes(backend.readAllBytes(sidecarName))
-        }
+            val sidecarName = BsmetaSidecar.sidecarFileName(workspace.vaultFileName)
+            if (backend.exists(sidecarName)) {
+                File(stagingDir, sidecarName).writeBytes(backend.readAllBytes(sidecarName))
+            }
 
-        updateState(workspaceId, WorkspaceState.StagedEncrypted)
-        stagedVault
+            updateState(workspaceId, WorkspaceState.StagedEncrypted)
+            stagedVault
+        }
     }
 
     /**

@@ -212,6 +212,8 @@ fun BackStageApp(
         var showPreferencesDialog by remember { mutableStateOf(false) }
         var activePasswordPrompt by remember { mutableStateOf<ActivePasswordPrompt?>(null) }
         var bannerFeedback by remember { mutableStateOf<String?>(null) }
+        var inFlightWorkspaces by remember { mutableStateOf(setOf<WorkspaceId>()) }
+        var inFlightGroups by remember { mutableStateOf(setOf<GroupId>()) }
 
         fun reloadWorkspaces() {
             if (engine.isUnlocked) {
@@ -355,95 +357,132 @@ fun BackStageApp(
                             onManageGroupsClick = { showManageGroupsDialog = true },
                             onOpenPreferencesClick = { showPreferencesDialog = true },
                             onOpenSettings = { selectedWorkspaceForSettings = it },
+                            inFlightWorkspaces = inFlightWorkspaces,
+                            inFlightGroups = inFlightGroups,
                             onLoadWorkspace = { ws ->
-                                scope.launch {
-                                    runCatching {
-                                        engine.arbiter.loadWorkspace(ws.id) { needsPwd ->
-                                            val deferred = CompletableDeferred<String?>()
-                                            activePasswordPrompt = ActivePasswordPrompt(ws, needsPwd, deferred)
-                                            val result = deferred.await()
-                                            activePasswordPrompt = null
-                                            result
+                                if (ws.id !in inFlightWorkspaces && engine.arbiter.currentState(ws.id) !is WorkspaceState.Busy) {
+                                    inFlightWorkspaces = inFlightWorkspaces + ws.id
+                                    scope.launch {
+                                        try {
+                                            runCatching {
+                                                engine.arbiter.loadWorkspace(ws.id) { needsPwd ->
+                                                    val deferred = CompletableDeferred<String?>()
+                                                    activePasswordPrompt = ActivePasswordPrompt(ws, needsPwd, deferred)
+                                                    val result = deferred.await()
+                                                    activePasswordPrompt = null
+                                                    result
+                                                }
+                                                bannerFeedback = "Restored '${ws.displayName}'"
+                                                reloadWorkspaces()
+                                            }.onFailure { err ->
+                                                bannerFeedback = formatUserFriendlyError(err)
+                                            }
+                                        } finally {
+                                            inFlightWorkspaces = inFlightWorkspaces - ws.id
                                         }
-                                        bannerFeedback = "Restored '${ws.displayName}'"
-                                        reloadWorkspaces()
-                                    }.onFailure { err ->
-                                        bannerFeedback = formatUserFriendlyError(err)
                                     }
                                 }
                             },
                             onEvictWorkspace = { ws, forceIgnoreHandles ->
-                                scope.launch {
-                                    runCatching {
-                                        engine.arbiter.evictWorkspace(
-                                            workspaceId = ws.id,
-                                            forceIgnoreHandles = forceIgnoreHandles,
-                                        ) { needsPwd ->
-                                            val deferred = CompletableDeferred<String?>()
-                                            activePasswordPrompt = ActivePasswordPrompt(ws, needsPwd, deferred)
-                                            val result = deferred.await()
-                                            activePasswordPrompt = null
-                                            result
+                                if (ws.id !in inFlightWorkspaces && engine.arbiter.currentState(ws.id) !is WorkspaceState.Busy) {
+                                    inFlightWorkspaces = inFlightWorkspaces + ws.id
+                                    scope.launch {
+                                        try {
+                                            runCatching {
+                                                engine.arbiter.evictWorkspace(
+                                                    workspaceId = ws.id,
+                                                    forceIgnoreHandles = forceIgnoreHandles,
+                                                ) { needsPwd ->
+                                                    val deferred = CompletableDeferred<String?>()
+                                                    activePasswordPrompt = ActivePasswordPrompt(ws, needsPwd, deferred)
+                                                    val result = deferred.await()
+                                                    activePasswordPrompt = null
+                                                    result
+                                                }
+                                                bannerFeedback = "Archived '${ws.displayName}'"
+                                                reloadWorkspaces()
+                                            }.onFailure { err ->
+                                                bannerFeedback = formatUserFriendlyError(err)
+                                            }
+                                        } finally {
+                                            inFlightWorkspaces = inFlightWorkspaces - ws.id
                                         }
-                                        bannerFeedback = "Archived '${ws.displayName}'"
-                                        reloadWorkspaces()
-                                    }.onFailure { err ->
-                                        bannerFeedback = formatUserFriendlyError(err)
                                     }
                                 }
                             },
                             onStageWorkspace = { ws ->
-                                scope.launch {
-                                    runCatching {
-                                        engine.arbiter.stageEncryptedPrefetch(ws.id)
-                                        bannerFeedback = "Staged '${ws.displayName}' for instant restore"
-                                        reloadWorkspaces()
-                                    }.onFailure { err ->
-                                        bannerFeedback = formatUserFriendlyError(err)
+                                if (ws.id !in inFlightWorkspaces && engine.arbiter.currentState(ws.id) !is WorkspaceState.Busy) {
+                                    inFlightWorkspaces = inFlightWorkspaces + ws.id
+                                    scope.launch {
+                                        try {
+                                            runCatching {
+                                                engine.arbiter.stageEncryptedPrefetch(ws.id)
+                                                bannerFeedback = "Staged '${ws.displayName}' for instant restore"
+                                                reloadWorkspaces()
+                                            }.onFailure { err ->
+                                                bannerFeedback = formatUserFriendlyError(err)
+                                            }
+                                        } finally {
+                                            inFlightWorkspaces = inFlightWorkspaces - ws.id
+                                        }
                                     }
                                 }
                             },
                             onLoadGroup = { grp ->
-                                scope.launch {
-                                    runCatching {
-                                        engine.lifecycleDaemon.loadGroup(grp.id) { needsPwd ->
-                                            val dummyWs = workspaces.firstOrNull { it.groupId == grp.id }
-                                                ?: workspaces.firstOrNull()
-                                            if (dummyWs == null) null
-                                            else {
-                                                val deferred = CompletableDeferred<String?>()
-                                                activePasswordPrompt = ActivePasswordPrompt(dummyWs, needsPwd, deferred)
-                                                val result = deferred.await()
-                                                activePasswordPrompt = null
-                                                result
+                                if (grp.id !in inFlightGroups) {
+                                    inFlightGroups = inFlightGroups + grp.id
+                                    scope.launch {
+                                        try {
+                                            runCatching {
+                                                engine.lifecycleDaemon.loadGroup(grp.id) { needsPwd ->
+                                                    val dummyWs = workspaces.firstOrNull { it.groupId == grp.id }
+                                                        ?: workspaces.firstOrNull()
+                                                    if (dummyWs == null) null
+                                                    else {
+                                                        val deferred = CompletableDeferred<String?>()
+                                                        activePasswordPrompt = ActivePasswordPrompt(dummyWs, needsPwd, deferred)
+                                                        val result = deferred.await()
+                                                        activePasswordPrompt = null
+                                                        result
+                                                    }
+                                                }
+                                                bannerFeedback = "Restored group '${grp.displayName}'"
+                                                reloadWorkspaces()
+                                            }.onFailure { err ->
+                                                bannerFeedback = formatUserFriendlyError(err)
                                             }
+                                        } finally {
+                                            inFlightGroups = inFlightGroups - grp.id
                                         }
-                                        bannerFeedback = "Restored group '${grp.displayName}'"
-                                        reloadWorkspaces()
-                                    }.onFailure { err ->
-                                        bannerFeedback = formatUserFriendlyError(err)
                                     }
                                 }
                             },
                             onEvictGroup = { grp ->
-                                scope.launch {
-                                    runCatching {
-                                        engine.lifecycleDaemon.evictGroup(grp.id) { needsPwd ->
-                                            val dummyWs = workspaces.firstOrNull { it.groupId == grp.id }
-                                                ?: workspaces.firstOrNull()
-                                            if (dummyWs == null) null
-                                            else {
-                                                val deferred = CompletableDeferred<String?>()
-                                                activePasswordPrompt = ActivePasswordPrompt(dummyWs, needsPwd, deferred)
-                                                val result = deferred.await()
-                                                activePasswordPrompt = null
-                                                result
+                                if (grp.id !in inFlightGroups) {
+                                    inFlightGroups = inFlightGroups + grp.id
+                                    scope.launch {
+                                        try {
+                                            runCatching {
+                                                engine.lifecycleDaemon.evictGroup(grp.id) { needsPwd ->
+                                                    val dummyWs = workspaces.firstOrNull { it.groupId == grp.id }
+                                                        ?: workspaces.firstOrNull()
+                                                    if (dummyWs == null) null
+                                                    else {
+                                                        val deferred = CompletableDeferred<String?>()
+                                                        activePasswordPrompt = ActivePasswordPrompt(dummyWs, needsPwd, deferred)
+                                                        val result = deferred.await()
+                                                        activePasswordPrompt = null
+                                                        result
+                                                    }
+                                                }
+                                                bannerFeedback = "Archived group '${grp.displayName}'"
+                                                reloadWorkspaces()
+                                            }.onFailure { err ->
+                                                bannerFeedback = formatUserFriendlyError(err)
                                             }
+                                        } finally {
+                                            inFlightGroups = inFlightGroups - grp.id
                                         }
-                                        bannerFeedback = "Archived group '${grp.displayName}'"
-                                        reloadWorkspaces()
-                                    }.onFailure { err ->
-                                        bannerFeedback = formatUserFriendlyError(err)
                                     }
                                 }
                             },
@@ -683,6 +722,8 @@ private fun DashboardScreen(
     onManageGroupsClick: () -> Unit,
     onOpenPreferencesClick: () -> Unit,
     onOpenSettings: (WorkspaceConfig) -> Unit,
+    inFlightWorkspaces: Set<WorkspaceId> = emptySet(),
+    inFlightGroups: Set<GroupId> = emptySet(),
     onLoadWorkspace: (WorkspaceConfig) -> Unit,
     onEvictWorkspace: (WorkspaceConfig, Boolean) -> Unit,
     onStageWorkspace: (WorkspaceConfig) -> Unit,
@@ -1054,19 +1095,22 @@ private fun DashboardScreen(
                             )
                         }
                         if (selectedGroup != null) {
+                            val isGroupInFlight = selectedGroup.id in inFlightGroups
                             TextButton(
                                 onClick = { onLoadGroup(selectedGroup) },
+                                enabled = !isGroupInFlight,
                                 modifier = Modifier.height(30.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             ) {
-                                Text("Restore All", color = AccentPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                                Text("Restore All", color = if (isGroupInFlight) TextMuted else AccentPrimary, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
                             }
                             TextButton(
                                 onClick = { onEvictGroup(selectedGroup) },
+                                enabled = !isGroupInFlight,
                                 modifier = Modifier.height(30.dp),
                                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
                             ) {
-                                Text("Archive All", color = TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
+                                Text("Archive All", color = if (isGroupInFlight) TextMuted.copy(alpha = 0.5f) else TextMuted, fontSize = 11.sp, fontWeight = FontWeight.Medium)
                             }
                         }
                     }
@@ -1142,6 +1186,7 @@ private fun DashboardScreen(
                         workspace = ws,
                         groupName = grpName,
                         state = states[ws.id] ?: WorkspaceState.Vaulted,
+                        isInFlight = ws.id in inFlightWorkspaces,
                         onLoad = { onLoadWorkspace(ws) },
                         onEvict = { force -> onEvictWorkspace(ws, force) },
                         onStage = { onStageWorkspace(ws) },
@@ -1245,6 +1290,7 @@ private fun WorkspaceCard(
     workspace: WorkspaceConfig,
     groupName: String?,
     state: WorkspaceState,
+    isInFlight: Boolean = false,
     onLoad: () -> Unit,
     onEvict: (Boolean) -> Unit,
     onStage: () -> Unit,
@@ -1263,9 +1309,9 @@ private fun WorkspaceCard(
         is WorkspaceState.Busy -> {
             val opText = when (state.operation) {
                 WorkspaceOperation.EVICTING, WorkspaceOperation.PURGING, WorkspaceOperation.LOCKING -> "Archiving"
-                WorkspaceOperation.EXTRACTING -> "Restoring"
+                WorkspaceOperation.EXTRACTING, WorkspaceOperation.VALIDATING, WorkspaceOperation.KEY_CHECK, WorkspaceOperation.KEY_DERIVATION, WorkspaceOperation.ARBITRATING -> "Restoring"
                 WorkspaceOperation.ROTATING_KEY -> "Updating"
-                else -> "Working"
+                WorkspaceOperation.PASSWORD_PROMPT -> "Password Required"
             }
             opText to AccentPrimary
         }
@@ -1367,7 +1413,7 @@ private fun WorkspaceCard(
                 }
 
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    if (state is WorkspaceState.Active) {
+                    if (state is WorkspaceState.Active && !isInFlight) {
                         OutlinedButton(
                             onClick = { onEvict(false) },
                             shape = RoundedCornerShape(7.dp),
@@ -1377,7 +1423,7 @@ private fun WorkspaceCard(
                         ) {
                             Text("Archive", color = AccentPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
-                    } else if (state !is WorkspaceState.Busy) {
+                    } else if (state !is WorkspaceState.Busy && !isInFlight) {
                         if (state is WorkspaceState.Vaulted) {
                             TextButton(
                                 onClick = onStage,
@@ -1400,12 +1446,23 @@ private fun WorkspaceCard(
                         ) {
                             Text("Restore", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                         }
+                    } else if (isInFlight && state !is WorkspaceState.Busy) {
+                        Box(
+                            modifier = Modifier.size(32.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            CircularProgressIndicator(
+                                color = AccentPrimary,
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
                     }
                     Box(
                         modifier = Modifier
                             .size(32.dp)
                             .clip(RoundedCornerShape(7.dp))
-                            .clickable(onClick = onSettings),
+                            .clickable(enabled = state !is WorkspaceState.Busy && !isInFlight, onClick = onSettings),
                         contentAlignment = Alignment.Center,
                     ) {
                         BackStageGlyph(type = GlyphType.SLIDERS, color = TextMuted, size = 14.dp)

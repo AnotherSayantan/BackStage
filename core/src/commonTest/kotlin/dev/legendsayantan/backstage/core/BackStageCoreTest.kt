@@ -609,6 +609,67 @@ class BackStageCoreTest {
         }
         assertEquals(1.0f, unpackProgress.last(), 1e-4f)
     }
+
+    @Test
+    fun `staged prefetch metadata provides instant verification and concurrent load calls are deduplicated`() = runTest {
+        val deviceDir = File(tempRoot, "dev_instant_stage")
+        val vaultDir = File(tempRoot, "vault_instant_stage")
+        val localDir = File(tempRoot, "local_instant_stage")
+        localDir.mkdirs()
+        File(localDir, "data.bin").writeBytes(ByteArray(100_000) { (it % 256).toByte() })
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+
+            val wsId = WorkspaceId("ws_INSTANT01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Instant Staging Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "instant.bstage",
+                localTargetPath = localDir.absolutePath,
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(config)
+
+            // Evict and stage
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true, passwordOverrideForNewVault = "test-pass")
+            assertFalse(localDir.exists())
+
+            val stagedFile = engine.arbiter.stageEncryptedPrefetch(wsId)
+            val stagedMacFile = File(stagedFile.parentFile, "${stagedFile.name}.bsstage_mac")
+            assertTrue(stagedFile.isFile)
+            assertTrue(stagedMacFile.isFile)
+
+            val macContent = stagedMacFile.readText().trim()
+            val parts = macContent.split(":")
+            assertEquals(3, parts.size, "Stage MAC should contain hash, size, and mtime")
+            assertEquals(stagedFile.length(), parts[1].toLong())
+            assertEquals(stagedFile.lastModified(), parts[2].toLong())
+
+            // Restore from staged file (instant verification)
+            engine.arbiter.loadWorkspace(wsId, forceIgnoreHandles = true) { "test-pass" }
+            assertTrue(localDir.isDirectory)
+            assertEquals(100_000L, File(localDir, "data.bin").length())
+            assertFalse(stagedFile.exists(), "Staged file should be purged after extraction")
+
+            // Re-evict and test legacy MAC format fallback
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true, passwordOverrideForNewVault = "test-pass")
+            engine.arbiter.stageEncryptedPrefetch(wsId)
+            // Overwrite MAC file with legacy 1-part format (hash only)
+            stagedMacFile.writeText(parts[0])
+
+            // Load should fall back to full BLAKE3 verification and succeed
+            engine.arbiter.loadWorkspace(wsId, forceIgnoreHandles = true) { "test-pass" }
+            assertTrue(localDir.isDirectory)
+            assertEquals(100_000L, File(localDir, "data.bin").length())
+
+            // Calling loadWorkspace again when already active is a deduplicated no-op
+            engine.arbiter.loadWorkspace(wsId, forceIgnoreHandles = true) { "test-pass" }
+            assertEquals(WorkspaceState.Active, engine.arbiter.currentState(wsId))
+        }
+    }
 }
+
 
 

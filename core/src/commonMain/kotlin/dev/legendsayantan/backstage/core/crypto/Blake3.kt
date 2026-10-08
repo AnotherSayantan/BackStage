@@ -32,18 +32,30 @@ object Blake3 {
         return out
     }
 
-    fun hashFile(file: java.io.File): ByteArray {
+    fun hashFile(file: java.io.File): ByteArray = hashFileWithProgress(file)
+
+    fun hashFileWithProgress(
+        file: java.io.File,
+        bufferSizeBytes: Int = 1024 * 1024,
+        onProgress: ((Float, Long, Long) -> Unit)? = null,
+    ): ByteArray {
+        val totalBytes = file.length().coerceAtLeast(1L)
         val hasher = StreamingHasher()
-        java.io.FileInputStream(file).use { fis ->
-            val buf = ByteArray(65_536)
+        java.io.FileInputStream(file).buffered(bufferSizeBytes).use { fis ->
+            val buf = ByteArray(bufferSizeBytes)
+            var bytesReadSoFar = 0L
             while (true) {
                 val read = fis.read(buf)
                 if (read <= 0) break
                 hasher.update(buf, 0, read)
+                bytesReadSoFar += read
+                val frac = (bytesReadSoFar.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                onProgress?.invoke(frac, bytesReadSoFar, totalBytes)
             }
         }
         return hasher.finish()
     }
+
 
     class StreamingHasher {
         private val digest = Blake3Digest(DIGEST_LENGTH * 8)
