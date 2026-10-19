@@ -527,55 +527,40 @@ fun BackStageApp(
                             onCreated = { created, initialPassword ->
                                 showNewWorkspaceDialog = false
                                 workspaces = workspaces + created
+                                engine.arbiter.updateState(created.id, WorkspaceState.Active)
                                 scope.launch {
                                     val localDir = java.io.File(created.resolvedLocalPath())
-                                    val hadExistingContent = localDir.exists() && (localDir.listFiles()?.isNotEmpty() == true)
-                                    if (hadExistingContent) {
-                                        // Directory already has files — write the lock token and
-                                        // show it as Active without archiving the content away.
-                                        withContext(Dispatchers.IO) {
-                                            FolderLock.writeLock(localDir, created.id)
-                                            if (initialPassword != null && created.vaultFormat.isEncrypted) {
-                                                runCatching {
-                                                    val initMaterial = engine.passwordVerifier.initializeWorkspaceKey(created, initialPassword)
-                                                    val backend = dev.legendsayantan.backstage.core.backend.VaultBackendFactory.create(created.vaultBackend)
-                                                    val sidecarName = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.sidecarFileName(created.vaultFileName)
-                                                    val macCover = initMaterial.argon2Salt + initMaterial.wrappedKey
-                                                    val headerMac = dev.legendsayantan.backstage.core.crypto.Blake3.keyedHash(macCover, initMaterial.vaultKey)
-                                                    val sidecar = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar(
-                                                        workspaceId = created.id.value,
-                                                        displayName = created.displayName,
-                                                        platformOrigin = created.platformOrigin,
-                                                        vaultFormat = created.vaultFormat.fileExtension,
-                                                        archiveFilename = created.vaultFileName,
-                                                        passwordHint = (created.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
-                                                        headerMacHex = headerMac.toHexString(),
-                                                        kdf = dev.legendsayantan.backstage.core.crypto.BsmetaKdfInfo(
-                                                            saltHex = initMaterial.argon2Salt.toHexString(),
-                                                            wrappedKeyHex = initMaterial.wrappedKey.toHexString(),
-                                                        )
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { localDir.mkdirs() }
+                                        runCatching {
+                                            FolderLock.writeLock(localDir, created.id, snapshot = emptyList())
+                                        }
+                                        if (initialPassword != null && created.vaultFormat.isEncrypted) {
+                                            runCatching {
+                                                val initMaterial = engine.passwordVerifier.initializeWorkspaceKey(created, initialPassword)
+                                                val backend = dev.legendsayantan.backstage.core.backend.VaultBackendFactory.create(created.vaultBackend)
+                                                val sidecarName = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.sidecarFileName(created.vaultFileName)
+                                                val macCover = initMaterial.argon2Salt + initMaterial.wrappedKey
+                                                val headerMac = dev.legendsayantan.backstage.core.crypto.Blake3.keyedHash(macCover, initMaterial.vaultKey)
+                                                val sidecar = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar(
+                                                    workspaceId = created.id.value,
+                                                    displayName = created.displayName,
+                                                    platformOrigin = created.platformOrigin,
+                                                    vaultFormat = created.vaultFormat.fileExtension,
+                                                    archiveFilename = created.vaultFileName,
+                                                    passwordHint = (created.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
+                                                    headerMacHex = headerMac.toHexString(),
+                                                    kdf = dev.legendsayantan.backstage.core.crypto.BsmetaKdfInfo(
+                                                        saltHex = initMaterial.argon2Salt.toHexString(),
+                                                        wrappedKeyHex = initMaterial.wrappedKey.toHexString(),
                                                     )
-                                                    backend.writeAllBytes(sidecarName, dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.encode(sidecar).encodeToByteArray())
-                                                }
+                                                )
+                                                backend.writeAllBytes(sidecarName, dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.encode(sidecar).encodeToByteArray())
                                             }
                                         }
-                                        bannerFeedback = "Created '${created.displayName}'"
-                                        reloadWorkspaces()
-                                    } else {
-                                        // New empty directory — archive immediately so the vault exists.
-                                        bannerFeedback = "Archiving '${created.displayName}'..."
-                                        runCatching {
-                                            engine.arbiter.evictWorkspace(
-                                                workspaceId = created.id,
-                                                passwordOverrideForNewVault = initialPassword,
-                                            )
-                                            bannerFeedback = "Created '${created.displayName}'"
-                                            reloadWorkspaces()
-                                        }.onFailure { err ->
-                                            bannerFeedback = "Created workspace, but archiving failed: ${formatUserFriendlyError(err)}"
-                                            reloadWorkspaces()
-                                        }
                                     }
+                                    bannerFeedback = "Created '${created.displayName}'"
+                                    reloadWorkspaces()
                                 }
                             },
                         )
@@ -1423,16 +1408,14 @@ private fun WorkspaceCard(
                         ) {
                             Text("Archive", color = AccentPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
-                    } else if (state !is WorkspaceState.Busy && !isInFlight) {
-                        if (state is WorkspaceState.Vaulted) {
-                            TextButton(
-                                onClick = onStage,
-                                shape = RoundedCornerShape(7.dp),
-                                modifier = Modifier.height(32.dp),
-                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                            ) {
-                                Text("Stage", color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
-                            }
+                    } else if (state is WorkspaceState.Vaulted && !isInFlight) {
+                        TextButton(
+                            onClick = onStage,
+                            shape = RoundedCornerShape(7.dp),
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                        ) {
+                            Text("Stage", color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
                         Button(
                             onClick = onLoad,
@@ -1445,6 +1428,39 @@ private fun WorkspaceCard(
                             contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
                         ) {
                             Text("Restore", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else if (state is WorkspaceState.StagedEncrypted && !isInFlight) {
+                        Button(
+                            onClick = onLoad,
+                            shape = RoundedCornerShape(7.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentPrimary,
+                                contentColor = Color(0xFF12100B),
+                            ),
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                        ) {
+                            Text("Restore", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    } else if (state is WorkspaceState.Missing && !isInFlight) {
+                        OutlinedButton(
+                            onClick = onSettings,
+                            shape = RoundedCornerShape(7.dp),
+                            border = BorderStroke(1.dp, WarningColor.copy(alpha = 0.5f)),
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            Text("Configure", color = WarningColor, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        }
+                    } else if (state is WorkspaceState.Error && !isInFlight) {
+                        OutlinedButton(
+                            onClick = onSettings,
+                            shape = RoundedCornerShape(7.dp),
+                            border = BorderStroke(1.dp, DangerColor.copy(alpha = 0.5f)),
+                            modifier = Modifier.height(32.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        ) {
+                            Text("Details", color = DangerColor, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
                     } else if (isInFlight && state !is WorkspaceState.Busy) {
                         Box(

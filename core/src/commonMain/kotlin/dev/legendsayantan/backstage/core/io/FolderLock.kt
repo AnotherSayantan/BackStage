@@ -65,14 +65,20 @@ object FolderLock {
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
         snapshot: List<FileSnapshotEntry> = captureSnapshot(directory, onProgress),
     ): LockToken {
-        directory.mkdirs()
+        runCatching { directory.mkdirs() }
         val token = LockToken(
             workspaceId = workspaceId.value,
             pid = pid,
             loadedAtEpochSeconds = loadedAtEpochSeconds,
             snapshot = snapshot,
         )
-        File(directory, LOCK_FILE_NAME).writeText(json.encodeToString(token))
+        val lockFile = File(directory, LOCK_FILE_NAME)
+        runCatching {
+            if (lockFile.exists() && !lockFile.canWrite()) {
+                lockFile.setWritable(true)
+            }
+            lockFile.writeText(json.encodeToString(token))
+        }
         return token
     }
 
@@ -85,11 +91,27 @@ object FolderLock {
         onProgress: (Float, Long, Long) -> Unit = { _, _, _ -> },
     ): List<FileSnapshotEntry> {
         if (!directory.isDirectory) return emptyList()
-        val allPaths = Files.walk(directory.toPath()).use { stream ->
-            stream.filter { it != directory.toPath() }
-                .sorted()
-                .toList()
+        val allPaths = mutableListOf<java.nio.file.Path>()
+        runCatching {
+            Files.walkFileTree(directory.toPath(), object : java.nio.file.SimpleFileVisitor<java.nio.file.Path>() {
+                override fun preVisitDirectory(dir: java.nio.file.Path, attrs: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
+                    if (dir != directory.toPath()) {
+                        allPaths.add(dir)
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun visitFile(file: java.nio.file.Path, attrs: java.nio.file.attribute.BasicFileAttributes): java.nio.file.FileVisitResult {
+                    allPaths.add(file)
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+
+                override fun visitFileFailed(file: java.nio.file.Path, exc: java.io.IOException?): java.nio.file.FileVisitResult {
+                    return java.nio.file.FileVisitResult.CONTINUE
+                }
+            })
         }
+        allPaths.sort()
         val totalBytes = allPaths.sumOf { p ->
             runCatching {
                 if (Files.isRegularFile(p, LinkOption.NOFOLLOW_LINKS)) Files.size(p) else 0L

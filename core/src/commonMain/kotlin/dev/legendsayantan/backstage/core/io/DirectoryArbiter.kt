@@ -82,21 +82,56 @@ class DirectoryArbiter(
         backendOverride: VaultBackend? = null,
     ): WorkspaceState = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
         val localDir = File(workspace.resolvedLocalPath())
-        val lock = FolderLock.readLock(localDir)
-        if (lock != null && lock.workspaceId == workspace.id.value) {
-            return@withContext WorkspaceState.Active
-        }
+        val localDirIsDirectory = runCatching { localDir.isDirectory }.getOrDefault(false)
+
         val stagedFile = File(stagingDir, workspace.vaultFileName)
-        if (stagedFile.isFile) {
+        val stagedExists = runCatching { stagedFile.isFile }.getOrDefault(false)
+
+        val backend = runCatching { backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend) }.getOrNull()
+        val vaultExists = runCatching { backend?.exists(workspace.vaultFileName) == true }.getOrDefault(false)
+
+        if (localDirIsDirectory) {
+            val lock = FolderLock.readLock(localDir)
+            if (lock != null) {
+                if (lock.workspaceId == workspace.id.value) {
+                    return@withContext WorkspaceState.Active
+                }
+                // Lock exists but belongs to a different workspace!
+                // This directory is occupied by someone else, so fall through to staged / vault / missing checks.
+            } else {
+                // No lock token file in local directory.
+                val hasLocalContent = runCatching {
+                    val entries = localDir.listFiles()
+                    entries != null && entries.any { it.name !in FolderLock.IGNORED_FILES }
+                }.getOrDefault(false)
+
+                if (!vaultExists && !stagedExists) {
+                    // Local directory exists on disk and has never been vaulted or staged.
+                    // This is 100% an Active workspace!
+                    runCatching {
+                        FolderLock.writeLock(localDir, workspace.id, snapshot = emptyList())
+                    }
+                    return@withContext WorkspaceState.Active
+                }
+
+                if (hasLocalContent) {
+                    // Files exist in local directory even though a vault exists.
+                    // The workspace is locally present and unpacked.
+                    runCatching {
+                        FolderLock.writeLock(localDir, workspace.id, snapshot = emptyList())
+                    }
+                    return@withContext WorkspaceState.Active
+                }
+            }
+        }
+
+        if (stagedExists) {
             return@withContext WorkspaceState.StagedEncrypted
         }
-        val backend = runCatching { backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend) }.getOrNull()
-            ?: return@withContext WorkspaceState.Missing
-        if (backend.exists(workspace.vaultFileName)) {
-            WorkspaceState.Vaulted
-        } else {
-            WorkspaceState.Missing
+        if (vaultExists) {
+            return@withContext WorkspaceState.Vaulted
         }
+        WorkspaceState.Missing
     }
 
     /**
@@ -883,13 +918,13 @@ class DirectoryArbiter(
         val clampedProgress = progress.coerceIn(0f, 1f)
         val existingBusy = _states.value[id] as? WorkspaceState.Busy
         val sameOperation = existingBusy != null && existingBusy.operation == op
-        val monotonicProgress = if (sameOperation) {
-            maxOf(clampedProgress, existingBusy!!.progressFraction)
+        val monotonicProgress = if (existingBusy != null && sameOperation) {
+            maxOf(clampedProgress, existingBusy.progressFraction)
         } else {
             clampedProgress
         }
-        val monotonicBytes = if (sameOperation) {
-            maxOf(bytesProcessed, existingBusy!!.bytesProcessed)
+        val monotonicBytes = if (existingBusy != null && sameOperation) {
+            maxOf(bytesProcessed, existingBusy.bytesProcessed)
         } else {
             bytesProcessed
         }
@@ -914,7 +949,7 @@ class DirectoryArbiter(
         )
     }
 
-    private fun updateState(id: WorkspaceId, state: WorkspaceState) {
+    fun updateState(id: WorkspaceId, state: WorkspaceState) {
         _states.update { current ->
             current + (id to state)
         }

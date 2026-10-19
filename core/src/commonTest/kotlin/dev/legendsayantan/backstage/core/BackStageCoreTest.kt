@@ -669,6 +669,143 @@ class BackStageCoreTest {
             assertEquals(WorkspaceState.Active, engine.arbiter.currentState(wsId))
         }
     }
+
+    @Test
+    fun `existing local folder workspace without vault is detected as Active, not Missing`() = runTest {
+        val deviceDir = File(tempRoot, "device_local_test")
+        val vaultDir = File(tempRoot, "vault_local_test")
+        val localDir = File(tempRoot, "local_existing_adobe")
+        localDir.mkdirs()
+        File(localDir, "App.exe").writeText("Mock Executable")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_ADOBE01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Adobe",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "adobe.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.Native,
+                keyMode = WorkspaceKeyMode.ManualOnEveryUse,
+                createdAtEpochSeconds = 1700000000L,
+            )
+
+            // Local folder exists on disk, no .bstage_lock, no vault yet
+            val detectedState = engine.arbiter.detectWorkspaceState(config)
+            assertEquals(
+                WorkspaceState.Active,
+                detectedState,
+                "An existing local folder workspace without vault must be detected as Active, never Missing"
+            )
+
+            // Verify .bstage_lock was opportunistically written
+            val lock = FolderLock.readLock(localDir)
+            assertNotNull(lock, "Lock should be opportunistically established for active local directory")
+            assertEquals(wsId.value, lock.workspaceId)
+        }
+    }
+
+    @Test
+    fun `empty existing local folder workspace without vault is detected as Active, not Missing`() = runTest {
+        val deviceDir = File(tempRoot, "device_empty_test")
+        val vaultDir = File(tempRoot, "vault_empty_test")
+        val localDir = File(tempRoot, "local_empty_dir")
+        localDir.mkdirs()
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_EMPTY01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Empty Workspace",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "empty.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.Native,
+                keyMode = WorkspaceKeyMode.ManualOnEveryUse,
+                createdAtEpochSeconds = 1700000000L,
+            )
+
+            val detectedState = engine.arbiter.detectWorkspaceState(config)
+            assertEquals(
+                WorkspaceState.Active,
+                detectedState,
+                "An empty local folder workspace without vault must be detected as Active"
+            )
+        }
+    }
+
+    @Test
+    fun `workspace with non-existent local directory and non-existent vault is detected as Missing`() = runTest {
+        val deviceDir = File(tempRoot, "device_missing_test")
+        val vaultDir = File(tempRoot, "vault_missing_test")
+        val localDir = File(tempRoot, "non_existent_folder")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_MISSING01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Missing Workspace",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "missing.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.Native,
+                keyMode = WorkspaceKeyMode.ManualOnEveryUse,
+                createdAtEpochSeconds = 1700000000L,
+            )
+
+            val detectedState = engine.arbiter.detectWorkspaceState(config)
+            assertEquals(
+                WorkspaceState.Missing,
+                detectedState,
+                "Workspace with no local directory and no vault must be detected as Missing"
+            )
+        }
+    }
+
+    @Test
+    fun `workspace with existing files and existing vault is detected as Active`() = runTest {
+        val deviceDir = File(tempRoot, "device_files_and_vault")
+        val vaultDir = File(tempRoot, "vault_files_and_vault")
+        val localDir = File(tempRoot, "local_files_and_vault")
+        localDir.mkdirs()
+        File(localDir, "test.txt").writeText("Hello BackStage")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_BOTH01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Both Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "both.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.PlainCompressed,
+                keyMode = null,
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(config)
+
+            // Evict to create the vault
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true)
+            assertFalse(localDir.exists())
+
+            // Recreate local directory with files and delete .bstage_lock to simulate manual restore or unarchived state
+            localDir.mkdirs()
+            File(localDir, "restored.txt").writeText("Unarchived content")
+            FolderLock.removeLock(localDir)
+
+            val detectedState = engine.arbiter.detectWorkspaceState(config)
+            assertEquals(
+                WorkspaceState.Active,
+                detectedState,
+                "When local files are present on disk, workspace must be detected as Active even if vault exists"
+            )
+        }
+    }
 }
 
 
