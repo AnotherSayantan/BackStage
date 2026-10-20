@@ -21,7 +21,7 @@ class LocalPathBackend(
 
     constructor(directoryPath: String) : this(File(directoryPath))
 
-    private fun resolveFile(fileName: String): File {
+    fun resolveFile(fileName: String): File {
         rootDirectory.mkdirs()
         return File(rootDirectory, fileName)
     }
@@ -63,20 +63,22 @@ class LocalPathBackend(
         f.readBytes()
     }
 
-    private fun atomicMoveWithFallback(tmp: File, target: File) {
-        try {
-            java.nio.file.Files.move(
-                tmp.toPath(),
-                target.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
-            java.nio.file.Files.move(
-                tmp.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
+    companion object {
+        fun atomicMoveWithFallback(tmp: File, target: File) {
+            try {
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: java.nio.file.AtomicMoveNotSupportedException) {
+                java.nio.file.Files.move(
+                    tmp.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
         }
     }
 
@@ -97,7 +99,7 @@ class LocalPathBackend(
         val target = resolveFile(fileName)
         target.parentFile?.mkdirs()
         val tmp = java.io.File(target.parent, "${target.name}.tmp")
-        val fos = FileOutputStream(tmp)
+        val fos = java.io.BufferedOutputStream(FileOutputStream(tmp), 2 * 1024 * 1024)
         val delegate = fos.asSink()
         object : RawSink by delegate {
             private var closed = false

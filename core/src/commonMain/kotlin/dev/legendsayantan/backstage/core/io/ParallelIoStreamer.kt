@@ -7,6 +7,7 @@ import dev.legendsayantan.backstage.core.crypto.ArchiveFileType
 import dev.legendsayantan.backstage.core.crypto.Argon2Config
 import dev.legendsayantan.backstage.core.crypto.Blake3
 import dev.legendsayantan.backstage.core.crypto.BsmetaKdfInfo
+import dev.legendsayantan.backstage.core.crypto.BsmetaManualRecovery
 import dev.legendsayantan.backstage.core.crypto.BsmetaSidecar
 import dev.legendsayantan.backstage.core.crypto.ChunkManifestEntry
 import dev.legendsayantan.backstage.core.crypto.CipherSuiteDetector
@@ -115,6 +116,16 @@ class ParallelIoStreamer {
                 wrappedKey = wrappedKey,
                 onProgress = safeProgress,
             )
+
+            VaultFormatConfig.PlainSevenZip -> packPortableSevenZip(
+                workspace = workspace,
+                sourceDirectory = sourceDirectory,
+                backend = backend,
+                vaultKey = ByteArray(AeadCipher.KEY_BYTES),
+                argon2Salt = ByteArray(Argon2Config.SALT_LENGTH),
+                wrappedKey = ByteArray(AeadCipher.WRAPPED_KEY_BYTES),
+                onProgress = safeProgress,
+            )
         }
     }
 
@@ -139,7 +150,7 @@ class ParallelIoStreamer {
                 onProgress = safeProgress,
             )
 
-            VaultFormatConfig.Portable -> unpackPortableSevenZip(
+            VaultFormatConfig.Portable, VaultFormatConfig.PlainSevenZip -> unpackPortableSevenZip(
                 workspace = workspace,
                 targetDirectory = targetDirectory,
                 backend = backend,
@@ -165,7 +176,13 @@ class ParallelIoStreamer {
 
         val cipherSuite = CipherSuiteDetector.detect()
         val dataNonce = SecureRandomProvider.nextBytes(AeadCipher.NONCE_BYTES)
-        val tempChunksFile = File.createTempFile("backstage_pack_", ".chunks")
+        val targetVault = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
+        val tempChunksFile = if (targetVault != null) {
+            targetVault.parentFile?.mkdirs()
+            File.createTempFile("backstage_pack_", ".chunks", targetVault.parentFile)
+        } else {
+            File.createTempFile("backstage_pack_", ".chunks")
+        }
 
         try {
             val manifest = ArrayList<ChunkManifestEntry>()
@@ -429,7 +446,7 @@ class ParallelIoStreamer {
                 ioBuf.write(variableHeaderBytes)
                 outSink.write(ioBuf, ioBuf.size)
                 java.io.FileInputStream(tempChunksFile).use { fis ->
-                    val copyBuf = ByteArray(65_536)
+                    val copyBuf = ByteArray(4 * 1024 * 1024)
                     while (true) {
                         val read = fis.read(copyBuf)
                         if (read <= 0) break
@@ -705,27 +722,38 @@ class ParallelIoStreamer {
     ): Long {
         val sevenZipExe = SevenZipDetector.ensureAvailable()
         val hexPassword = vaultKey.toHexString()
-        val tempArchive = File.createTempFile("backstage_portable_", ".7z")
+        val localVaultFile = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
+        val isDirectLocal = localVaultFile != null
+        val tempArchive = if (localVaultFile != null) {
+            localVaultFile.parentFile?.mkdirs()
+            File(localVaultFile.parentFile, "${localVaultFile.name}.tmp")
+        } else {
+            File.createTempFile("backstage_portable_", ".7z")
+        }
         tempArchive.delete() // 7z creates a new archive at this path
         val totalSize = CapacityValidator.directorySizeBytes(sourceDirectory).coerceAtLeast(1L)
 
         try {
-            val cmd = listOf(
+            val isEncrypted = workspace.vaultFormat.isEncrypted
+            val cmd = mutableListOf(
                 sevenZipExe.absolutePath,
                 "a",
                 "-t7z",
                 "-y",
                 "-bso0",
                 "-bsp1",
-                "-mhe=on",
                 "-mx=5",
-                "-p$hexPassword",
-                "-xr!${FolderLock.LOCK_FILE_NAME}",
-                "-xr!backstage.bat",
-                "-xr!backstage.sh",
-                tempArchive.absolutePath,
-                "."
-            )
+            ).apply {
+                if (isEncrypted) {
+                    add("-mhe=on")
+                    add("-p$hexPassword")
+                }
+                add("-xr!${FolderLock.LOCK_FILE_NAME}")
+                add("-xr!backstage.bat")
+                add("-xr!backstage.sh")
+                add(tempArchive.absolutePath)
+                add(".")
+            }
             val proc = ProcessBuilder(cmd)
                 .directory(sourceDirectory)
                 .redirectErrorStream(true)
@@ -744,25 +772,18 @@ class ParallelIoStreamer {
                             if (ch < 0) break
                             val c = ch.toChar()
                             if (outputText.length < 16_384) outputText.append(c)
-                            if (c == '\r' || c == '\n' || c == '\b') {
+                            if (c == '\r' || c == '\n' || c == '\b' || c == '%') {
+                                if (c == '%') tokenBuf.append(c)
                                 val match = pctRegex.find(tokenBuf)
                                 if (match != null) {
                                     val pct = match.groupValues[1].toIntOrNull()?.coerceIn(0, 100) ?: 0
-                                    val frac = (pct / 100f) * 0.82f
-                                    onProgress(frac, ((totalSize * pct) / 100L).coerceIn(0L, totalSize), totalSize)
+                                    val frac = if (isDirectLocal) (pct / 100f) else (pct / 100f) * 0.82f
+                                    val doneBytes = if (isDirectLocal) ((totalSize * pct) / 100L) else ((totalSize * pct * 82L) / 10000L)
+                                    onProgress(frac, doneBytes.coerceIn(0L, totalSize), totalSize)
                                 }
                                 tokenBuf.clear()
                             } else {
                                 tokenBuf.append(c)
-                                if (c == '%') {
-                                    val match = pctRegex.find(tokenBuf)
-                                    if (match != null) {
-                                        val pct = match.groupValues[1].toIntOrNull()?.coerceIn(0, 100) ?: 0
-                                        val frac = (pct / 100f) * 0.82f
-                                        onProgress(frac, ((totalSize * pct) / 100L).coerceIn(0L, totalSize), totalSize)
-                                    }
-                                    tokenBuf.clear()
-                                }
                             }
                         }
                     }
@@ -782,54 +803,90 @@ class ParallelIoStreamer {
                 throw BackStageException(BackStageError.BackendIOError("7z pack failed: $outputText"))
             }
 
-            if (tempArchive.isFile) {
-                val archiveLen = tempArchive.length().coerceAtLeast(1L)
-                var copied = 0L
-                backend.openWriteStream(workspace.vaultFileName).use { outSink ->
-                    val ioBuf = kotlinx.io.Buffer()
-                    java.io.FileInputStream(tempArchive).use { fis ->
-                        val buf = ByteArray(65_536)
-                        while (true) {
-                            val read = fis.read(buf)
-                            if (read <= 0) break
-                            ioBuf.write(buf, 0, read)
-                            outSink.write(ioBuf, ioBuf.size)
-                            copied += read
-                            val writeFrac = (copied.toFloat() / archiveLen.toFloat()).coerceIn(0f, 1f)
-                            onProgress(0.82f + writeFrac * 0.17f, totalSize, totalSize)
-                        }
-                    }
-                    outSink.flush()
+            if (localVaultFile != null) {
+                if (tempArchive.isFile) {
+                    dev.legendsayantan.backstage.core.backend.LocalPathBackend.atomicMoveWithFallback(tempArchive, localVaultFile)
+                } else {
+                    localVaultFile.writeBytes(ByteArray(0))
                 }
             } else {
-                backend.writeAllBytes(workspace.vaultFileName, ByteArray(0))
+                if (tempArchive.isFile) {
+                    val archiveLen = tempArchive.length().coerceAtLeast(1L)
+                    var copied = 0L
+                    backend.openWriteStream(workspace.vaultFileName).use { outSink ->
+                        val ioBuf = kotlinx.io.Buffer()
+                        java.io.FileInputStream(tempArchive).use { fis ->
+                            val buf = ByteArray(4 * 1024 * 1024)
+                            while (true) {
+                                val read = fis.read(buf)
+                                if (read <= 0) break
+                                ioBuf.write(buf, 0, read)
+                                outSink.write(ioBuf, ioBuf.size)
+                                copied += read
+                                val writeFrac = (copied.toFloat() / archiveLen.toFloat()).coerceIn(0f, 1f)
+                                val currentDone = ((totalSize * 0.82f) + (totalSize * 0.18f * writeFrac)).toLong().coerceIn(0L, totalSize)
+                                onProgress(0.82f + writeFrac * 0.17f, currentDone, totalSize)
+                            }
+                        }
+                        outSink.flush()
+                    }
+                } else {
+                    backend.writeAllBytes(workspace.vaultFileName, ByteArray(0))
+                }
             }
 
-            val macCover = argon2Salt + wrappedKey
-            val headerMac = Blake3.keyedHash(macCover, vaultKey)
-            val sidecar = BsmetaSidecar(
-                workspaceId = workspace.id.value,
-                displayName = workspace.displayName,
-                platformOrigin = workspace.platformOrigin,
-                vaultFormat = VaultFormatConfig.Portable.fileExtension,
-                archiveFilename = workspace.vaultFileName,
-                passwordHint = (workspace.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
-                headerMacHex = headerMac.toHexString(),
-                kdf = BsmetaKdfInfo(
-                    saltHex = argon2Salt.toHexString(),
-                    wrappedKeyHex = wrappedKey.toHexString(),
-                ),
-            )
-            backend.writeAllBytes(
-                BsmetaSidecar.sidecarFileName(workspace.vaultFileName),
-                BsmetaSidecar.encode(sidecar).encodeToByteArray(),
-            )
+            if (isEncrypted) {
+                val macCover = argon2Salt + wrappedKey
+                val headerMac = Blake3.keyedHash(macCover, vaultKey)
+                val sidecar = BsmetaSidecar(
+                    workspaceId = workspace.id.value,
+                    displayName = workspace.displayName,
+                    platformOrigin = workspace.platformOrigin,
+                    vaultFormat = VaultFormatConfig.Portable.fileExtension,
+                    archiveFilename = workspace.vaultFileName,
+                    passwordHint = (workspace.keyMode as? WorkspaceKeyMode.PasswordBacked)?.passwordHint,
+                    headerMacHex = headerMac.toHexString(),
+                    kdf = BsmetaKdfInfo(
+                        saltHex = argon2Salt.toHexString(),
+                        wrappedKeyHex = wrappedKey.toHexString(),
+                    ),
+                )
+                backend.writeAllBytes(
+                    BsmetaSidecar.sidecarFileName(workspace.vaultFileName),
+                    BsmetaSidecar.encode(sidecar).encodeToByteArray(),
+                )
+            } else {
+                val sidecar = BsmetaSidecar(
+                    workspaceId = workspace.id.value,
+                    displayName = workspace.displayName,
+                    platformOrigin = workspace.platformOrigin,
+                    vaultFormat = "plain7z",
+                    archiveFilename = workspace.vaultFileName,
+                    passwordHint = null,
+                    headerMacHex = null,
+                    kdf = null,
+                    manualRecovery = BsmetaManualRecovery(
+                        steps = listOf(
+                            "This is a standard unencrypted 7-Zip archive.",
+                            "Extract directly using 7-Zip, Peazip, or any standard decompression tool: 7z x ${workspace.vaultFileName}"
+                        )
+                    ),
+                )
+                backend.writeAllBytes(
+                    BsmetaSidecar.sidecarFileName(workspace.vaultFileName),
+                    BsmetaSidecar.encode(sidecar).encodeToByteArray(),
+                )
+            }
 
             val actualTotalSize = CapacityValidator.directorySizeBytes(sourceDirectory)
             onProgress(1.0f, actualTotalSize, actualTotalSize.coerceAtLeast(1L))
             return actualTotalSize
         } finally {
-            tempArchive.delete()
+            if (!isDirectLocal) {
+                tempArchive.delete()
+            } else if (tempArchive.exists()) {
+                tempArchive.delete()
+            }
         }
     }
 
@@ -842,47 +899,59 @@ class ParallelIoStreamer {
     ): Long {
         val sevenZipExe = SevenZipDetector.ensureAvailable()
         val hexPassword = vaultKey.toHexString()
-        val tempArchive = File.createTempFile("backstage_portable_extract_", ".7z")
+        val localVaultFile = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
+        val archiveToExtract = if (localVaultFile != null && localVaultFile.isFile) {
+            localVaultFile
+        } else {
+            File.createTempFile("backstage_portable_extract_", ".7z")
+        }
+        val isDirectLocal = archiveToExtract == localVaultFile
         val vaultSize = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
         val estimatedTotal = (workspace.uncompressedSizeBytes ?: vaultSize).coerceAtLeast(1L)
 
         try {
-            var readSoFar = 0L
-            backend.openReadStream(workspace.vaultFileName).use { source ->
-                java.io.FileOutputStream(tempArchive).buffered().use { fos ->
-                    val ioBuf = kotlinx.io.Buffer()
-                    val buf = ByteArray(65_536)
-                    while (true) {
-                        val readLong = source.readAtMostTo(ioBuf, 65_536L)
-                        if (readLong <= 0L) break
-                        while (ioBuf.size > 0L) {
-                            val chunkLen = minOf(buf.size.toLong(), ioBuf.size).toInt()
-                            val n = ioBuf.readAtMostTo(buf, 0, chunkLen)
-                            if (n <= 0) break
-                            fos.write(buf, 0, n)
-                            readSoFar += n
-                            val readFrac = (readSoFar.toFloat() / vaultSize.toFloat()).coerceIn(0f, 1f)
-                            onProgress(readFrac * 0.25f, ((estimatedTotal * readFrac) * 0.25f).toLong(), estimatedTotal)
+            if (!isDirectLocal) {
+                var readSoFar = 0L
+                backend.openReadStream(workspace.vaultFileName).use { source ->
+                    java.io.FileOutputStream(archiveToExtract).buffered().use { fos ->
+                        val ioBuf = kotlinx.io.Buffer()
+                        val buf = ByteArray(4 * 1024 * 1024)
+                        while (true) {
+                            val readLong = source.readAtMostTo(ioBuf, 4 * 1024 * 1024L)
+                            if (readLong <= 0L) break
+                            while (ioBuf.size > 0L) {
+                                val chunkLen = minOf(buf.size.toLong(), ioBuf.size).toInt()
+                                val n = ioBuf.readAtMostTo(buf, 0, chunkLen)
+                                if (n <= 0) break
+                                fos.write(buf, 0, n)
+                                readSoFar += n
+                                val readFrac = (readSoFar.toFloat() / vaultSize.toFloat()).coerceIn(0f, 1f)
+                                onProgress(readFrac * 0.25f, ((estimatedTotal * readFrac) * 0.25f).toLong(), estimatedTotal)
+                            }
                         }
                     }
                 }
             }
             targetDirectory.mkdirs()
-            if (tempArchive.length() == 0L) {
+            if (archiveToExtract.length() == 0L) {
                 onProgress(1.0f, 0L, 0L)
                 return 0L
             }
 
-            val cmd = listOf(
+            val isEncrypted = workspace.vaultFormat.isEncrypted
+            val cmd = mutableListOf(
                 sevenZipExe.absolutePath,
                 "x",
                 "-y",
                 "-bso0",
                 "-bsp1",
-                "-p$hexPassword",
-                "-o${targetDirectory.absolutePath}",
-                tempArchive.absolutePath
-            )
+            ).apply {
+                if (isEncrypted) {
+                    add("-p$hexPassword")
+                }
+                add("-o${targetDirectory.absolutePath}")
+                add(archiveToExtract.absolutePath)
+            }
             val proc = ProcessBuilder(cmd)
                 .redirectErrorStream(true)
                 .start()
@@ -904,8 +973,9 @@ class ParallelIoStreamer {
                                 val match = pctRegex.find(tokenBuf)
                                 if (match != null) {
                                     val pct = match.groupValues[1].toIntOrNull()?.coerceIn(0, 100) ?: 0
-                                    val frac = 0.25f + (pct / 100f) * 0.74f
-                                    onProgress(frac, ((estimatedTotal * frac)).toLong().coerceIn(0L, estimatedTotal), estimatedTotal)
+                                    val frac = if (isDirectLocal) (pct / 100f) else (0.25f + (pct / 100f) * 0.74f)
+                                    val doneBytes = if (isDirectLocal) ((estimatedTotal * pct) / 100L) else ((estimatedTotal * frac)).toLong()
+                                    onProgress(frac, doneBytes.coerceIn(0L, estimatedTotal), estimatedTotal)
                                 }
                                 tokenBuf.clear()
                             } else {
@@ -926,14 +996,20 @@ class ParallelIoStreamer {
             }
             readerThread.join(2_000)
             if (proc.exitValue() != 0) {
-                throw BackStageException(BackStageError.WrongPassword, "7z extraction failed: $outputText")
+                if (isEncrypted) {
+                    throw BackStageException(BackStageError.WrongPassword, "7z extraction failed: $outputText")
+                } else {
+                    throw BackStageException(BackStageError.BackendIOError("7z extraction failed: $outputText"))
+                }
             }
 
             val totalSize = CapacityValidator.directorySizeBytes(targetDirectory)
             onProgress(1.0f, totalSize, totalSize.coerceAtLeast(1L))
             return totalSize
         } finally {
-            tempArchive.delete()
+            if (!isDirectLocal) {
+                archiveToExtract.delete()
+            }
         }
     }
 

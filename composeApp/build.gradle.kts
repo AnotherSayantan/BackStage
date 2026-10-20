@@ -62,8 +62,8 @@ android {
         applicationId = "dev.legendsayantan.backstage"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.1.4"
     }
 
     packaging {
@@ -86,7 +86,7 @@ compose.desktop {
         nativeDistributions {
             targetFormats(TargetFormat.Msi, TargetFormat.Exe, TargetFormat.Deb, TargetFormat.AppImage)
             packageName = "BackStage"
-            packageVersion = "0.1.3"
+            packageVersion = "0.1.4"
             description = "Cross-Platform Encrypted Workspace Lifecycle Manager"
             vendor = "LegendSayantan"
 

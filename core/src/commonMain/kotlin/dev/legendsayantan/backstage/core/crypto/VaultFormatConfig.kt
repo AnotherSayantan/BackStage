@@ -59,6 +59,17 @@ sealed interface VaultFormatConfig {
     }
 
     /**
+     * Unencrypted standard 7-Zip archive without password or encryption, with .bsmeta sidecar.
+     * Openable directly with standard 7-Zip or any archive tool without password.
+     * Extension: .7z
+     */
+    @Serializable
+    data object PlainSevenZip : VaultFormatConfig {
+        override val fileExtension: String = "7z"
+        override val isEncrypted: Boolean = false
+    }
+
+    /**
      * Unencrypted Zstd-compressed archive with BLAKE3 integrity manifest.
      * Extension: .bvault
      */

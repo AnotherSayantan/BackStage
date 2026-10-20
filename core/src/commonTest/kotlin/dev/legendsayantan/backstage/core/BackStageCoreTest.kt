@@ -806,6 +806,111 @@ class BackStageCoreTest {
             )
         }
     }
+
+    @Test
+    fun testPlainSevenZipEvictAndRestoreWithoutPassword() = runTest {
+        val deviceDir = File(tempRoot, "bstage_plain7z_dev")
+        val localDir = File(tempRoot, "bstage_plain7z_local")
+        val vaultDir = File(tempRoot, "bstage_plain7z_vault")
+        localDir.mkdirs()
+        vaultDir.mkdirs()
+        File(localDir, "plain_sample.txt").writeText("Unencrypted 7z payload content")
+        val sub = File(localDir, "subfolder").apply { mkdirs() }
+        File(sub, "nested.txt").writeText("Nested unencrypted file")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_PLAIN7Z_01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Plain 7z Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "plain_archive.7z",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.PlainSevenZip,
+                keyMode = null,
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(config)
+
+            // Evict (compress into unencrypted .7z archive)
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true)
+            assertFalse(localDir.exists(), "Local directory should be removed after eviction")
+
+            val vaultFile = File(vaultDir, "plain_archive.7z")
+            assertTrue(vaultFile.exists(), "Vault file should exist")
+            assertTrue(vaultFile.length() > 0L, "Vault file should not be empty")
+
+            val sidecarFile = File(vaultDir, "plain_archive.7z.bsmeta")
+            assertTrue(sidecarFile.exists(), "Sidecar should exist")
+            val sidecar = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.decode(sidecarFile.readText())
+            assertEquals("plain7z", sidecar.vaultFormat)
+            assertNull(sidecar.kdf, "Plain 7z sidecar must not contain KDF info")
+            assertNull(sidecar.headerMacHex, "Plain 7z sidecar must not contain headerMacHex")
+
+            // Restore (uncompress without password)
+            engine.arbiter.loadWorkspace(wsId)
+            assertTrue(localDir.exists(), "Local directory should be restored")
+            assertEquals("Unencrypted 7z payload content", File(localDir, "plain_sample.txt").readText())
+            assertEquals("Nested unencrypted file", File(sub, "nested.txt").readText())
+        }
+    }
+
+    @Test
+    fun testMigrateBetweenPortableAndPlainSevenZip() = runTest {
+        val deviceDir = File(tempRoot, "bstage_mig7z_dev")
+        val localDir = File(tempRoot, "bstage_mig7z_local")
+        val vaultDir = File(tempRoot, "bstage_mig7z_vault")
+        localDir.mkdirs()
+        vaultDir.mkdirs()
+        File(localDir, "secret_data.txt").writeText("Secret migration test content")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_MIG7Z_01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Migrate 7z Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "mig_archive.7z",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.Portable,
+                keyMode = WorkspaceKeyMode.PasswordBacked(
+                    keystoreAlias = WorkspaceConfig.defaultKeystoreAlias(wsId)
+                ),
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(config)
+
+            // Evict as encrypted Portable .7z
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true, passwordOverrideForNewVault = "pwd123456")
+            assertFalse(localDir.exists())
+
+            val sidecarEncrypted = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.decode(
+                File(vaultDir, "mig_archive.7z.bsmeta").readText()
+            )
+            assertNotNull(sidecarEncrypted.kdf, "Encrypted Portable sidecar must contain KDF info")
+
+            // Migrate to PlainSevenZip (unencrypted .7z)
+            val migratedPlain = engine.arbiter.migrateVaultFormat(
+                workspaceId = wsId,
+                targetFormat = VaultFormatConfig.PlainSevenZip,
+            )
+            assertEquals(VaultFormatConfig.PlainSevenZip, migratedPlain.vaultFormat)
+            assertNull(migratedPlain.keyMode, "PlainSevenZip must have keyMode = null")
+
+            val sidecarPlain = dev.legendsayantan.backstage.core.crypto.BsmetaSidecar.decode(
+                File(vaultDir, "mig_archive.7z.bsmeta").readText()
+            )
+            assertEquals("plain7z", sidecarPlain.vaultFormat)
+            assertNull(sidecarPlain.kdf, "Plain 7z sidecar must not contain KDF info")
+
+            // Restore without password
+            engine.arbiter.loadWorkspace(wsId)
+            assertTrue(localDir.exists())
+            assertEquals("Secret migration test content", File(localDir, "secret_data.txt").readText())
+        }
+    }
 }
 
 

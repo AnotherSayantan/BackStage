@@ -481,11 +481,16 @@ class DirectoryArbiter(
                         argon2Salt = salt,
                         wrappedKey = wrappedKey,
                     ) { fraction, done, total ->
+                        val msg = when {
+                            fraction >= 0.99f -> "Finalizing archive..."
+                            fraction >= 0.80f && (workspace.vaultFormat != VaultFormatConfig.Portable && workspace.vaultFormat != VaultFormatConfig.PlainSevenZip) -> "Writing vault archive..."
+                            else -> "Archiving ${workspace.displayName}..."
+                        }
                         setBusy(
                             id = workspaceId,
                             op = WorkspaceOperation.EVICTING,
                             progress = 0.15f + (fraction * 0.75f),
-                            message = "Archiving ${workspace.displayName}...",
+                            message = msg,
                             bytesProcessed = done,
                             totalBytes = total,
                         )
@@ -663,7 +668,13 @@ class DirectoryArbiter(
         val ext = vaultFile.extension.lowercase()
         val format = when (ext) {
             "bstage" -> VaultFormatConfig.Native
-            "7z" -> VaultFormatConfig.Portable
+            "7z" -> {
+                if (sidecar?.kdf != null || sidecar?.headerMacHex != null) {
+                    VaultFormatConfig.Portable
+                } else {
+                    VaultFormatConfig.PlainSevenZip
+                }
+            }
             "bvault" -> VaultFormatConfig.PlainCompressed
             else -> {
                 val magic = backend.readBytes(vaultFile.name, 0L, 4)
@@ -675,7 +686,7 @@ class DirectoryArbiter(
             }
         }
 
-        val tinyHeader = if (format != VaultFormatConfig.Portable && vaultFile.length() >= dev.legendsayantan.backstage.core.crypto.TinyHeader.TINY_HEADER_BYTES) {
+        val tinyHeader = if (format != VaultFormatConfig.Portable && format != VaultFormatConfig.PlainSevenZip && vaultFile.length() >= dev.legendsayantan.backstage.core.crypto.TinyHeader.TINY_HEADER_BYTES) {
             runCatching {
                 dev.legendsayantan.backstage.core.crypto.TinyHeader.parse(
                     backend.readBytes(vaultFile.name, 0L, dev.legendsayantan.backstage.core.crypto.TinyHeader.TINY_HEADER_BYTES)
@@ -817,6 +828,10 @@ class DirectoryArbiter(
 
         // Persist the updated config only after packing succeeds
         workspaceRepository.upsert(updatedConfig)
+
+        if (!targetFormat.isEncrypted && currentWorkspace.keyMode is WorkspaceKeyMode.PasswordBacked) {
+            runCatching { keyProvider.delete(currentWorkspace.keyMode.keystoreAlias) }
+        }
 
         if (oldVaultFileName != newVaultFileName && backend.exists(oldVaultFileName)) {
             backend.delete(oldVaultFileName)

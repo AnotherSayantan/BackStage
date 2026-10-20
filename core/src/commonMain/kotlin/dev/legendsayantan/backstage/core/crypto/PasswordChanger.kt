@@ -44,8 +44,8 @@ class PasswordChanger(
         backend: VaultBackend,
         currentVaultKeyOverride: ByteArray? = null,
     ) = withContext(Dispatchers.Default) {
-        require(workspace.vaultFormat != VaultFormatConfig.PlainCompressed) {
-            "Cannot change password on an unencrypted PlainCompressed workspace"
+        require(workspace.vaultFormat.isEncrypted) {
+            "Cannot change password on an unencrypted workspace (${workspace.vaultFormat})"
         }
 
         val vaultKey = currentVaultKeyOverride ?: run {
@@ -112,7 +112,7 @@ class PasswordChanger(
                         )
                     }
 
-                    VaultFormatConfig.PlainCompressed -> Unit
+                    VaultFormatConfig.PlainCompressed, VaultFormatConfig.PlainSevenZip -> Unit
                 }
             }
         } finally {

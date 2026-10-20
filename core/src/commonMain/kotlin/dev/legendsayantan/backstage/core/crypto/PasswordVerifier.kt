@@ -65,7 +65,7 @@ class PasswordVerifier(
         workspace: WorkspaceConfig,
         backend: VaultBackend,
     ): VaultKeyState = withContext(Dispatchers.IO) {
-        if (workspace.vaultFormat == VaultFormatConfig.PlainCompressed) {
+        if (!workspace.vaultFormat.isEncrypted) {
             return@withContext VaultKeyState.Ready(ByteArray(0))
         }
 
@@ -227,7 +227,8 @@ class PasswordVerifier(
                 )
             }
 
-            VaultFormatConfig.PlainCompressed -> error("PlainCompressed vaults do not have a KeyEnvelope")
+            VaultFormatConfig.PlainCompressed, VaultFormatConfig.PlainSevenZip ->
+                error("${workspace.vaultFormat} vaults do not have a KeyEnvelope")
         }
     }
 }

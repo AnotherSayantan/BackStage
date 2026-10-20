@@ -122,7 +122,8 @@ class AppConfigRepository(
 
     var defaultVaultFormat: VaultFormatConfig
         get() = when (get(KEY_DEFAULT_VAULT_FORMAT)?.lowercase()) {
-            "portable", "7z" -> VaultFormatConfig.Portable
+            "portable", "7z", "encrypted7z" -> VaultFormatConfig.Portable
+            "plainsevenzip", "plain7z", "7zplain", "7zunencrypted" -> VaultFormatConfig.PlainSevenZip
             "plain", "plaincompressed", "bvault" -> VaultFormatConfig.PlainCompressed
             else -> VaultFormatConfig.Native
         }
@@ -130,6 +131,7 @@ class AppConfigRepository(
             val str = when (value) {
                 VaultFormatConfig.Native -> "Native"
                 VaultFormatConfig.Portable -> "Portable"
+                VaultFormatConfig.PlainSevenZip -> "PlainSevenZip"
                 VaultFormatConfig.PlainCompressed -> "PlainCompressed"
             }
             set(KEY_DEFAULT_VAULT_FORMAT, str)

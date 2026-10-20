@@ -100,10 +100,10 @@ data class WorkspaceConfig(
     val uncompressedSizeBytes: Long? = null,
 ) {
     init {
-        val isPlain = vaultFormat == VaultFormatConfig.PlainCompressed
-        require(isPlain == (keyMode == null)) {
-            if (isPlain) {
-                "PlainCompressed workspace '$displayName' must have keyMode = null"
+        val isUnencrypted = !vaultFormat.isEncrypted
+        require(isUnencrypted == (keyMode == null)) {
+            if (isUnencrypted) {
+                "Unencrypted workspace '$displayName' ($vaultFormat) must have keyMode = null"
             } else {
                 "Encrypted workspace '$displayName' ($vaultFormat) must have a non-null keyMode"
             }

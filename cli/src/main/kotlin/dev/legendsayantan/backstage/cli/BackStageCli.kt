@@ -314,12 +314,13 @@ object BackStageCliRunner {
                 val wsIdArg = pos.getOrNull(2)
                 val targetStr = findFlagValue(args, "--to")?.lowercase()
                 if (sub != "migrate" || wsIdArg == null || targetStr == null) {
-                    out("Usage: bstage vault migrate <workspace-id> --to <native|portable|plain>")
+                    out("Usage: bstage vault migrate <workspace-id> --to <native|portable|plain-7z|plain>")
                     return 1
                 }
                 val targetFormat = when (targetStr) {
                     "native", "bstage" -> VaultFormatConfig.Native
-                    "portable", "7z" -> VaultFormatConfig.Portable
+                    "portable", "7z", "encrypted-7z" -> VaultFormatConfig.Portable
+                    "plain-7z", "plain7z", "unencrypted-7z", "7z-plain" -> VaultFormatConfig.PlainSevenZip
                     "plain", "bvault" -> VaultFormatConfig.PlainCompressed
                     else -> {
                         out("✗ Unknown vault format: $targetStr")
@@ -429,6 +430,7 @@ object BackStageCliRunner {
         out: (String) -> Unit,
     ): String? {
         val reasonMsg = when (needsPwd.reason) {
+            PasswordReason.INITIAL_CREATION -> "Initial encryption password required for '${workspaceId.value}'."
             PasswordReason.NEW_DEVICE -> "Workspace '${workspaceId.value}' is new on this device."
             PasswordReason.KEY_ROTATED -> "Vault key for '${workspaceId.value}' was rotated on another device."
             PasswordReason.ALWAYS_REQUIRED -> "Workspace '${workspaceId.value}' requires manual password entry."

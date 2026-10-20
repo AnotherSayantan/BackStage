@@ -40,7 +40,7 @@ object CapacityValidator {
                     backend.sizeBytes(workspace.vaultFileName) * 2L
                 }
             }
-            VaultFormatConfig.Portable -> {
+            VaultFormatConfig.Portable, VaultFormatConfig.PlainSevenZip -> {
                 // Estimate 2.5x compressed .7z size if cached uncompressed size is unknown
                 (backend.sizeBytes(workspace.vaultFileName) * 5L) / 2L
             }
