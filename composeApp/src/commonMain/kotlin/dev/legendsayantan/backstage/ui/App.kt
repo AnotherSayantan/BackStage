@@ -1410,13 +1410,15 @@ private fun WorkspaceCard(
                             Text("Archive", color = AccentPrimary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
                         }
                     } else if (state is WorkspaceState.Vaulted && !isInFlight) {
-                        TextButton(
-                            onClick = onStage,
-                            shape = RoundedCornerShape(7.dp),
-                            modifier = Modifier.height(32.dp),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                        ) {
-                            Text("Stage", color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                        if (workspace.vaultFormat.isEncrypted) {
+                            TextButton(
+                                onClick = onStage,
+                                shape = RoundedCornerShape(7.dp),
+                                modifier = Modifier.height(32.dp),
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                            ) {
+                                Text("Stage", color = TextMuted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                            }
                         }
                         Button(
                             onClick = onLoad,

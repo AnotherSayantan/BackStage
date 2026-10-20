@@ -177,12 +177,9 @@ class ParallelIoStreamer {
         val cipherSuite = CipherSuiteDetector.detect()
         val dataNonce = SecureRandomProvider.nextBytes(AeadCipher.NONCE_BYTES)
         val targetVault = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
-        val tempChunksFile = if (targetVault != null) {
-            targetVault.parentFile?.mkdirs()
-            File.createTempFile("backstage_pack_", ".chunks", targetVault.parentFile)
-        } else {
-            File.createTempFile("backstage_pack_", ".chunks")
-        }
+        val tempChunksParent = targetVault?.parentFile ?: sourceDirectory.parentFile ?: sourceDirectory
+        tempChunksParent.mkdirs()
+        val tempChunksFile = File.createTempFile("backstage_pack_", ".chunks", tempChunksParent)
 
         try {
             val manifest = ArrayList<ChunkManifestEntry>()
@@ -515,7 +512,8 @@ class ParallelIoStreamer {
             throw BackStageException(BackStageError.HeaderMacInvalid)
         }
 
-        val tempPayloadFile = File.createTempFile("backstage_unpack_", ".payload")
+        val targetParent = targetDirectory.parentFile?.apply { mkdirs() } ?: targetDirectory.apply { mkdirs() }
+        val tempPayloadFile = File.createTempFile("backstage_unpack_", ".payload", targetParent)
         try {
             // 2. Phase 1 (0.00 -> 0.55): Stream, verify BLAKE3 chunk integrity BEFORE decrypting, & decompress in parallel
             val totalUncompressedEstimate = header.chunkManifest.sumOf { it.uncompressedLength.toLong() }
@@ -728,7 +726,8 @@ class ParallelIoStreamer {
             localVaultFile.parentFile?.mkdirs()
             File(localVaultFile.parentFile, "${localVaultFile.name}.tmp")
         } else {
-            File.createTempFile("backstage_portable_", ".7z")
+            val sourceParent = sourceDirectory.parentFile?.apply { mkdirs() } ?: sourceDirectory
+            File.createTempFile("backstage_portable_", ".7z", sourceParent)
         }
         tempArchive.delete() // 7z creates a new archive at this path
         val totalSize = CapacityValidator.directorySizeBytes(sourceDirectory).coerceAtLeast(1L)
@@ -903,7 +902,8 @@ class ParallelIoStreamer {
         val archiveToExtract = if (localVaultFile != null && localVaultFile.isFile) {
             localVaultFile
         } else {
-            File.createTempFile("backstage_portable_extract_", ".7z")
+            val targetParent = targetDirectory.parentFile?.apply { mkdirs() } ?: targetDirectory.apply { mkdirs() }
+            File.createTempFile("backstage_portable_extract_", ".7z", targetParent)
         }
         val isDirectLocal = archiveToExtract == localVaultFile
         val vaultSize = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)

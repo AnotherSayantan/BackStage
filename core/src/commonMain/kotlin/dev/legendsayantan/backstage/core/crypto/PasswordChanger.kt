@@ -150,8 +150,14 @@ class PasswordChanger(
             }
         }
 
+        val targetVault = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
+        val tempParent = targetVault?.parentFile?.apply { mkdirs() }
         val tempPayloadFile = withContext(Dispatchers.IO) {
-            java.io.File.createTempFile("backstage_rotate_", ".chunks")
+            if (tempParent != null) {
+                java.io.File.createTempFile("backstage_rotate_", ".chunks", tempParent)
+            } else {
+                java.io.File.createTempFile("backstage_rotate_", ".chunks")
+            }
         }
 
         try {

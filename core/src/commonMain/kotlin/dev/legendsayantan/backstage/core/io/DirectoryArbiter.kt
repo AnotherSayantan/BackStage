@@ -543,6 +543,10 @@ class DirectoryArbiter(
         val workspace = workspaceRepository.findById(workspaceId)
             ?: throw IllegalArgumentException("Unknown workspace: ${workspaceId.value}")
 
+        require(workspace.vaultFormat.isEncrypted) {
+            "Cannot stage unencrypted workspace '${workspace.displayName}'"
+        }
+
         val stagedVault = File(stagingDir, workspace.vaultFileName)
         val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
 
