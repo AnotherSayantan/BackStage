@@ -35,12 +35,16 @@ import java.nio.file.LinkOption
 import java.nio.file.Path
 import java.nio.file.attribute.PosixFilePermission
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicLong
 import java.util.zip.DeflaterOutputStream
 import java.util.zip.InflaterInputStream
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorInputStream
 import org.apache.commons.compress.compressors.zstandard.ZstdCompressorOutputStream
@@ -742,6 +746,7 @@ class ParallelIoStreamer {
                 "-bso0",
                 "-bsp1",
                 "-mx=5",
+                "-mmt=on",
             ).apply {
                 if (isEncrypted) {
                     add("-mhe=on")
@@ -762,6 +767,7 @@ class ParallelIoStreamer {
             // Drain process output concurrently and parse 7z percentage progress (-bsp1)
             val outputText = StringBuilder()
             val pctRegex = Regex("""(\d{1,3})%""")
+            val lastActivity = AtomicLong(System.currentTimeMillis())
             val readerThread = Thread {
                 runCatching {
                     proc.inputStream.bufferedReader().use { reader ->
@@ -769,6 +775,7 @@ class ParallelIoStreamer {
                         while (true) {
                             val ch = reader.read()
                             if (ch < 0) break
+                            lastActivity.set(System.currentTimeMillis())
                             val c = ch.toChar()
                             if (outputText.length < 16_384) outputText.append(c)
                             if (c == '\r' || c == '\n' || c == '\b' || c == '%') {
@@ -792,14 +799,30 @@ class ParallelIoStreamer {
                 start()
             }
 
-            val finished = proc.waitFor(10, TimeUnit.MINUTES)
-            if (!finished) {
-                proc.destroyForcibly()
-                throw BackStageException(BackStageError.BackendIOError("7z pack timed out"))
+            // Stall-based timeout: abort only if 7z produces no output/activity for 15 minutes,
+            // while allowing long-running active compression of large workspaces.
+            val stallTimeoutMillis = TimeUnit.MINUTES.toMillis(15)
+            while (proc.isAlive) {
+                if (!currentCoroutineContext().isActive) {
+                    proc.destroyForcibly()
+                    throw CancellationException("7z pack operation cancelled")
+                }
+                val elapsedSinceActivity = System.currentTimeMillis() - lastActivity.get()
+                if (elapsedSinceActivity > stallTimeoutMillis) {
+                    proc.destroyForcibly()
+                    throw BackStageException(
+                        BackStageError.BackendIOError("7z pack stalled with no activity for 15 minutes")
+                    )
+                }
+                proc.waitFor(250, TimeUnit.MILLISECONDS)
             }
             readerThread.join(2_000)
-            if (proc.exitValue() != 0) {
-                throw BackStageException(BackStageError.BackendIOError("7z pack failed: $outputText"))
+
+            val exitVal = proc.exitValue()
+            // 7-Zip exit code 0 = Success, 1 = Warning (e.g. transient locked/in-use files skipped)
+            val isSuccess = exitVal == 0 || (exitVal == 1 && tempArchive.isFile && tempArchive.length() > 0L)
+            if (!isSuccess) {
+                throw BackStageException(BackStageError.BackendIOError("7z pack failed (exit code $exitVal): $outputText"))
             }
 
             if (localVaultFile != null) {
@@ -945,6 +968,7 @@ class ParallelIoStreamer {
                 "-y",
                 "-bso0",
                 "-bsp1",
+                "-mmt=on",
             ).apply {
                 if (isEncrypted) {
                     add("-p$hexPassword")
@@ -959,6 +983,7 @@ class ParallelIoStreamer {
 
             val outputText = StringBuilder()
             val pctRegex = Regex("""(\d{1,3})%""")
+            val lastActivity = AtomicLong(System.currentTimeMillis())
             val readerThread = Thread {
                 runCatching {
                     proc.inputStream.bufferedReader().use { reader ->
@@ -966,6 +991,7 @@ class ParallelIoStreamer {
                         while (true) {
                             val ch = reader.read()
                             if (ch < 0) break
+                            lastActivity.set(System.currentTimeMillis())
                             val c = ch.toChar()
                             if (outputText.length < 16_384) outputText.append(c)
                             if (c == '\r' || c == '\n' || c == '\b' || c == '%') {
@@ -989,17 +1015,33 @@ class ParallelIoStreamer {
                 start()
             }
 
-            val finished = proc.waitFor(10, TimeUnit.MINUTES)
-            if (!finished) {
-                proc.destroyForcibly()
-                throw BackStageException(BackStageError.BackendIOError("7z extraction timed out"))
+            // Stall-based timeout: abort only if 7z produces no output/activity for 15 minutes,
+            // while allowing long-running active extraction of large archives.
+            val stallTimeoutMillis = TimeUnit.MINUTES.toMillis(15)
+            while (proc.isAlive) {
+                if (!currentCoroutineContext().isActive) {
+                    proc.destroyForcibly()
+                    throw CancellationException("7z extraction operation cancelled")
+                }
+                val elapsedSinceActivity = System.currentTimeMillis() - lastActivity.get()
+                if (elapsedSinceActivity > stallTimeoutMillis) {
+                    proc.destroyForcibly()
+                    throw BackStageException(
+                        BackStageError.BackendIOError("7z extraction stalled with no activity for 15 minutes")
+                    )
+                }
+                proc.waitFor(250, TimeUnit.MILLISECONDS)
             }
             readerThread.join(2_000)
-            if (proc.exitValue() != 0) {
-                if (isEncrypted) {
+
+            val exitVal = proc.exitValue()
+            // 7-Zip exit code 0 = Success, 1 = Warning
+            val isSuccess = exitVal == 0 || exitVal == 1
+            if (!isSuccess) {
+                if (isEncrypted && (exitVal == 2 || outputText.contains("Wrong password", ignoreCase = true))) {
                     throw BackStageException(BackStageError.WrongPassword, "7z extraction failed: $outputText")
                 } else {
-                    throw BackStageException(BackStageError.BackendIOError("7z extraction failed: $outputText"))
+                    throw BackStageException(BackStageError.BackendIOError("7z extraction failed (exit code $exitVal): $outputText"))
                 }
             }
 
