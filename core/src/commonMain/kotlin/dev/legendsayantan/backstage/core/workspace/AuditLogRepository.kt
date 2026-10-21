@@ -125,7 +125,8 @@ class AppConfigRepository(
             "portable", "7z", "encrypted7z" -> VaultFormatConfig.Portable
             "plainsevenzip", "plain7z", "7zplain", "7zunencrypted" -> VaultFormatConfig.PlainSevenZip
             "plain", "plaincompressed", "bvault" -> VaultFormatConfig.PlainCompressed
-            else -> VaultFormatConfig.Native
+            "native", "bstage" -> VaultFormatConfig.Native
+            else -> VaultFormatConfig.Portable
         }
         set(value) {
             val str = when (value) {

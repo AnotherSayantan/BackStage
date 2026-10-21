@@ -911,6 +911,99 @@ class BackStageCoreTest {
             assertEquals("Secret migration test content", File(localDir, "secret_data.txt").readText())
         }
     }
+
+    @Test
+    fun testLegacyBvaultAutoUpgradesToSevenZipOnReArchive() = runTest {
+        val deviceDir = File(tempRoot, "bstage_leg7z_dev")
+        val localDir = File(tempRoot, "bstage_leg7z_local")
+        val vaultDir = File(tempRoot, "bstage_leg7z_vault")
+        localDir.mkdirs()
+        vaultDir.mkdirs()
+        File(localDir, "legacy_file.txt").writeText("Legacy proprietary content")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_LEG7Z_01")
+            val config = WorkspaceConfig(
+                id = wsId,
+                displayName = "Legacy Bvault Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "legacy_vm.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.PlainCompressed,
+                keyMode = null,
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(config)
+
+            // 1. Simulate an existing proprietary .bvault file in cold storage
+            val bvaultFile = File(vaultDir, "legacy_vm.bvault")
+            val sevenZipFile = File(vaultDir, "legacy_vm.7z")
+            dev.legendsayantan.backstage.core.io.ParallelIoStreamer().packWorkspace(
+                workspace = config,
+                sourceDirectory = localDir,
+                backend = dev.legendsayantan.backstage.core.backend.LocalPathBackend(vaultDir),
+                vaultKey = ByteArray(32),
+                argon2Salt = ByteArray(16),
+                wrappedKey = ByteArray(60),
+            )
+            localDir.deleteRecursively()
+            assertTrue(bvaultFile.exists(), "Initial proprietary .bvault should exist in storage")
+
+            // 2. Load workspace (Restore from proprietary .bvault)
+            engine.arbiter.loadWorkspace(wsId)
+            assertTrue(localDir.exists())
+            assertEquals("Legacy proprietary content", File(localDir, "legacy_file.txt").readText())
+
+            // 3. Modify workspace files
+            File(localDir, "modified_content.txt").writeText("Updated VM file after restore")
+
+            // 4. Re-archive / Evict: should auto-upgrade to 7-Zip!
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true)
+            assertFalse(localDir.exists())
+
+            // Verify .bvault is replaced by .7z
+            assertFalse(bvaultFile.exists(), "Old .bvault file should be deleted")
+            assertTrue(sevenZipFile.exists() || File(vaultDir, "legacy_vm.7z.001").exists(), "New .7z file should exist")
+
+            val updatedConfig = engine.workspaceRepository.findById(wsId)
+            assertNotNull(updatedConfig)
+            assertEquals(VaultFormatConfig.PlainSevenZip, updatedConfig.vaultFormat)
+            assertEquals("legacy_vm.7z", updatedConfig.vaultFileName)
+
+            // 5. Restore from new 7z format
+            engine.arbiter.loadWorkspace(wsId)
+            assertTrue(localDir.exists())
+            assertEquals("Updated VM file after restore", File(localDir, "modified_content.txt").readText())
+        }
+    }
+
+    @Test
+    fun testLocalPathBackendMultiVolumeDetection() = runTest {
+        val vaultDir = File(tempRoot, "bstage_multivol_test")
+        vaultDir.mkdirs()
+        val backend = dev.legendsayantan.backstage.core.backend.LocalPathBackend(vaultDir)
+
+        val baseName = "test_archive.7z"
+        assertFalse(backend.exists(baseName))
+        assertEquals(0L, backend.sizeBytes(baseName))
+
+        // Create mock volume parts .001 and .002
+        val part1 = File(vaultDir, "$baseName.001")
+        val part2 = File(vaultDir, "$baseName.002")
+        part1.writeBytes(ByteArray(1024) { 1 })
+        part2.writeBytes(ByteArray(2048) { 2 })
+
+        assertTrue(backend.exists(baseName), "Should detect multi-volume archive via .001")
+        assertEquals(3072L, backend.sizeBytes(baseName), "Should sum lengths of all volume parts")
+        assertEquals(part1.absolutePath, backend.resolveArchiveFile(baseName).absolutePath)
+
+        // Delete should clean up all parts
+        backend.delete(baseName)
+        assertFalse(backend.exists(baseName))
+        assertFalse(part1.exists(), "Part 1 should be deleted")
+        assertFalse(part2.exists(), "Part 2 should be deleted")
+    }
 }
 
 

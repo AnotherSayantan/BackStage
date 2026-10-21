@@ -314,7 +314,7 @@ object BackStageCliRunner {
                 val wsIdArg = pos.getOrNull(2)
                 val targetStr = findFlagValue(args, "--to")?.lowercase()
                 if (sub != "migrate" || wsIdArg == null || targetStr == null) {
-                    out("Usage: bstage vault migrate <workspace-id> --to <native|portable|plain-7z|plain>")
+                    out("Usage: bstage vault migrate <workspace-id> --to <7z|plain-7z>")
                     return 1
                 }
                 val targetFormat = when (targetStr) {

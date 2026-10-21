@@ -460,21 +460,35 @@ class DirectoryArbiter(
                 true
             }
 
+            val isLegacyFormat = workspace.vaultFormat == VaultFormatConfig.PlainCompressed
+            val targetFormat = if (isLegacyFormat) VaultFormatConfig.PlainSevenZip else workspace.vaultFormat
+            val oldVaultFileName = workspace.vaultFileName
+            val effectiveVaultFileName = if (isLegacyFormat) {
+                oldVaultFileName.substringBeforeLast('.') + ".7z"
+            } else {
+                oldVaultFileName
+            }
+            val effectiveWorkspace = if (isLegacyFormat) {
+                workspace.copy(vaultFormat = targetFormat, vaultFileName = effectiveVaultFileName)
+            } else {
+                workspace
+            }
+
             var uncompressedBytes = workspace.uncompressedSizeBytes ?: CapacityValidator.directorySizeBytes(targetDir)
 
             if (needsRepack) {
-                setBusy(workspaceId, WorkspaceOperation.EVICTING, 0.15f, "Compressing and encrypting workspace to vault...")
+                setBusy(workspaceId, WorkspaceOperation.EVICTING, 0.15f, "Compressing and archiving workspace to vault...")
                 val (vaultKey, salt, wrappedKey) = resolveKeyMaterialForPack(
-                    workspace = workspace,
+                    workspace = effectiveWorkspace,
                     backend = backend,
-                    vaultAlreadyExists = vaultAlreadyExists,
+                    vaultAlreadyExists = vaultAlreadyExists && !isLegacyFormat,
                     passwordOverrideForNewVault = passwordOverrideForNewVault,
                     passwordCallback = passwordCallback,
                 )
 
                 try {
                     uncompressedBytes = ioStreamer.packWorkspace(
-                        workspace = workspace,
+                        workspace = effectiveWorkspace,
                         sourceDirectory = targetDir,
                         backend = backend,
                         vaultKey = vaultKey,
@@ -483,8 +497,8 @@ class DirectoryArbiter(
                     ) { fraction, done, total ->
                         val msg = when {
                             fraction >= 0.99f -> "Finalizing archive..."
-                            fraction >= 0.80f && (workspace.vaultFormat != VaultFormatConfig.Portable && workspace.vaultFormat != VaultFormatConfig.PlainSevenZip) -> "Writing vault archive..."
-                            else -> "Archiving ${workspace.displayName}..."
+                            fraction >= 0.80f && (effectiveWorkspace.vaultFormat != VaultFormatConfig.Portable && effectiveWorkspace.vaultFormat != VaultFormatConfig.PlainSevenZip) -> "Writing vault archive..."
+                            else -> "Archiving ${effectiveWorkspace.displayName}..."
                         }
                         setBusy(
                             id = workspaceId,
@@ -495,8 +509,16 @@ class DirectoryArbiter(
                             totalBytes = total,
                         )
                     }
+                    if (isLegacyFormat) {
+                        workspaceRepository.upsert(effectiveWorkspace)
+                        if (oldVaultFileName != effectiveVaultFileName && backend.exists(oldVaultFileName)) {
+                            backend.delete(oldVaultFileName)
+                            backend.delete(BsmetaSidecar.sidecarFileName(oldVaultFileName))
+                        }
+                    }
                     // Purge any stale staged copy since cold vault was updated
-                    purgeStagedFiles(workspace.vaultFileName)
+                    purgeStagedFiles(oldVaultFileName)
+                    purgeStagedFiles(effectiveVaultFileName)
                 } finally {
                     vaultKey.fill(0)
                 }

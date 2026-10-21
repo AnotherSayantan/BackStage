@@ -1282,10 +1282,10 @@ private fun WorkspaceCard(
     onSettings: () -> Unit,
 ) {
     val protectionLabel = when (workspace.vaultFormat) {
-        VaultFormatConfig.Native -> "Encrypted"
+        VaultFormatConfig.Native -> "Legacy .bstage"
         VaultFormatConfig.Portable -> "7z"
         VaultFormatConfig.PlainSevenZip -> "7z (Unencrypted)"
-        VaultFormatConfig.PlainCompressed -> "Unencrypted"
+        VaultFormatConfig.PlainCompressed -> "Legacy .bvault"
     }
     val (stateLabel, stateColor) = when (state) {
         WorkspaceState.Active -> "Active" to SuccessColor
@@ -2000,17 +2000,9 @@ private fun WorkspaceSettingsScreen(
                             onCheckedChange = { enabled ->
                                 encryptionEnabled = enabled
                                 selectedFormat = if (enabled) {
-                                    if (!selectedFormat.isEncrypted) {
-                                        VaultFormatConfig.Native
-                                    } else {
-                                        selectedFormat
-                                    }
+                                    VaultFormatConfig.Portable
                                 } else {
-                                    if (selectedFormat == VaultFormatConfig.Portable) {
-                                        VaultFormatConfig.PlainSevenZip
-                                    } else {
-                                        VaultFormatConfig.PlainCompressed
-                                    }
+                                    VaultFormatConfig.PlainSevenZip
                                 }
                             },
                         )
@@ -2019,18 +2011,9 @@ private fun WorkspaceSettingsScreen(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     VaultFormatOptionRow(
-                        selected = selectedFormat == VaultFormatConfig.Native,
-                        title = "Standard Vault (.bstage)",
-                        subtitle = "Encrypted and optimized for fast archive and restore.",
-                        onSelect = {
-                            encryptionEnabled = true
-                            selectedFormat = VaultFormatConfig.Native
-                        },
-                    )
-                    VaultFormatOptionRow(
                         selected = selectedFormat == VaultFormatConfig.Portable,
-                        title = "Portable Archive (.7z)",
-                        subtitle = "Encrypted 7-Zip archive that can also be opened with standard 7-Zip.",
+                        title = "7-Zip Encrypted (.7z)",
+                        subtitle = "AES-256 header encryption with multi-volume cloud protection. Fully openable with standard 7-Zip.",
                         onSelect = {
                             encryptionEnabled = true
                             selectedFormat = VaultFormatConfig.Portable
@@ -2038,22 +2021,24 @@ private fun WorkspaceSettingsScreen(
                     )
                     VaultFormatOptionRow(
                         selected = selectedFormat == VaultFormatConfig.PlainSevenZip,
-                        title = "Unencrypted 7-Zip (.7z)",
-                        subtitle = "Standard 7-Zip archive without encryption or password.",
+                        title = "7-Zip Unencrypted (.7z)",
+                        subtitle = "Standard open 7-Zip archive with multi-volume cloud protection without password.",
                         onSelect = {
                             encryptionEnabled = false
                             selectedFormat = VaultFormatConfig.PlainSevenZip
                         },
                     )
-                    VaultFormatOptionRow(
-                        selected = selectedFormat == VaultFormatConfig.PlainCompressed,
-                        title = "Unencrypted Vault (.bvault)",
-                        subtitle = "Fast compressed archive without password.",
-                        onSelect = {
-                            encryptionEnabled = false
-                            selectedFormat = VaultFormatConfig.PlainCompressed
-                        },
-                    )
+                    if (currentConfig.vaultFormat == VaultFormatConfig.Native || currentConfig.vaultFormat == VaultFormatConfig.PlainCompressed) {
+                        VaultFormatOptionRow(
+                            selected = selectedFormat == currentConfig.vaultFormat,
+                            title = "Legacy Vault (${if (currentConfig.vaultFormat == VaultFormatConfig.Native) ".bstage" else ".bvault"})",
+                            subtitle = "Legacy format (select a 7-Zip format above to migrate).",
+                            onSelect = {
+                                selectedFormat = currentConfig.vaultFormat
+                                encryptionEnabled = currentConfig.vaultFormat.isEncrypted
+                            },
+                        )
+                    }
 
                     if (formatChanged) {
                         Spacer(modifier = Modifier.height(12.dp))
@@ -2953,31 +2938,17 @@ private fun NewWorkspaceDialog(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FormatChoiceCard(
-                selected = format == VaultFormatConfig.Native,
-                title = "Standard",
-                subtitle = "Password (.bstage)",
-                onClick = { format = VaultFormatConfig.Native },
-                modifier = Modifier.weight(1f),
-            )
-            FormatChoiceCard(
                 selected = format == VaultFormatConfig.Portable,
-                title = "Portable",
-                subtitle = "Password (.7z)",
+                title = "7-Zip Encrypted",
+                subtitle = "AES-256 Password (.7z)",
                 onClick = { format = VaultFormatConfig.Portable },
                 modifier = Modifier.weight(1f),
             )
             FormatChoiceCard(
                 selected = format == VaultFormatConfig.PlainSevenZip,
-                title = "Plain 7-Zip",
-                subtitle = "No password (.7z)",
+                title = "7-Zip Plain",
+                subtitle = "Unencrypted (.7z)",
                 onClick = { format = VaultFormatConfig.PlainSevenZip },
-                modifier = Modifier.weight(1f),
-            )
-            FormatChoiceCard(
-                selected = format == VaultFormatConfig.PlainCompressed,
-                title = "Fast Vault",
-                subtitle = "No password (.bvault)",
-                onClick = { format = VaultFormatConfig.PlainCompressed },
                 modifier = Modifier.weight(1f),
             )
         }
@@ -3389,31 +3360,17 @@ private fun PreferencesAndActivityDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 FormatChoiceCard(
-                    selected = defaultFormat == VaultFormatConfig.Native,
-                    title = "Standard",
-                    subtitle = "Password (.bstage)",
-                    onClick = { defaultFormat = VaultFormatConfig.Native },
-                    modifier = Modifier.weight(1f),
-                )
-                FormatChoiceCard(
                     selected = defaultFormat == VaultFormatConfig.Portable,
-                    title = "Portable",
-                    subtitle = "Password (.7z)",
+                    title = "7-Zip Encrypted",
+                    subtitle = "AES-256 Password (.7z)",
                     onClick = { defaultFormat = VaultFormatConfig.Portable },
                     modifier = Modifier.weight(1f),
                 )
                 FormatChoiceCard(
                     selected = defaultFormat == VaultFormatConfig.PlainSevenZip,
-                    title = "Plain 7-Zip",
-                    subtitle = "No password (.7z)",
+                    title = "7-Zip Plain",
+                    subtitle = "Unencrypted (.7z)",
                     onClick = { defaultFormat = VaultFormatConfig.PlainSevenZip },
-                    modifier = Modifier.weight(1f),
-                )
-                FormatChoiceCard(
-                    selected = defaultFormat == VaultFormatConfig.PlainCompressed,
-                    title = "Fast Vault",
-                    subtitle = "No password (.bvault)",
-                    onClick = { defaultFormat = VaultFormatConfig.PlainCompressed },
                     modifier = Modifier.weight(1f),
                 )
             }

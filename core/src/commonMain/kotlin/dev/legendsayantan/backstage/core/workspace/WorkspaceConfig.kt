@@ -86,7 +86,7 @@ data class WorkspaceConfig(
     val vaultFileName: String,
     val localTargetPath: String,
     val platformPathOverrides: Map<Platform, String> = emptyMap(),
-    val vaultFormat: VaultFormatConfig = VaultFormatConfig.Native,
+    val vaultFormat: VaultFormatConfig = VaultFormatConfig.Portable,
     val keyMode: WorkspaceKeyMode? = WorkspaceKeyMode.PasswordBacked(
         keystoreAlias = defaultKeystoreAlias(id)
     ),

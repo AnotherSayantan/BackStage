@@ -181,7 +181,12 @@ class ParallelIoStreamer {
         val cipherSuite = CipherSuiteDetector.detect()
         val dataNonce = SecureRandomProvider.nextBytes(AeadCipher.NONCE_BYTES)
         val targetVault = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
-        val tempChunksParent = targetVault?.parentFile ?: sourceDirectory.parentFile ?: sourceDirectory
+        val isMountedCloud = workspace.vaultBackend is dev.legendsayantan.backstage.core.workspace.VaultBackendConfig.MountedDrive
+        val tempChunksParent = if (isMountedCloud) {
+            sourceDirectory.parentFile ?: sourceDirectory
+        } else {
+            targetVault?.parentFile ?: sourceDirectory.parentFile ?: sourceDirectory
+        }
         tempChunksParent.mkdirs()
         val tempChunksFile = File.createTempFile("backstage_pack_", ".chunks", tempChunksParent)
 
@@ -733,8 +738,12 @@ class ParallelIoStreamer {
             val sourceParent = sourceDirectory.parentFile?.apply { mkdirs() } ?: sourceDirectory
             File.createTempFile("backstage_portable_", ".7z", sourceParent)
         }
+        val tmpPrefix = "${tempArchive.name}."
         tempArchive.delete() // 7z creates a new archive at this path
+        tempArchive.parentFile?.listFiles { _, name -> name.startsWith(tmpPrefix) }?.forEach { it.delete() }
         val totalSize = CapacityValidator.directorySizeBytes(sourceDirectory).coerceAtLeast(1L)
+        val isMountedCloud = workspace.vaultBackend is dev.legendsayantan.backstage.core.workspace.VaultBackendConfig.MountedDrive
+        val useMultiVolume = totalSize >= 2L * 1024L * 1024L * 1024L || isMountedCloud
 
         try {
             val isEncrypted = workspace.vaultFormat.isEncrypted
@@ -748,6 +757,9 @@ class ParallelIoStreamer {
                 "-mx=5",
                 "-mmt=on",
             ).apply {
+                if (useMultiVolume) {
+                    add("-v2g")
+                }
                 if (isEncrypted) {
                     add("-mhe=on")
                     add("-p$hexPassword")
@@ -819,17 +831,41 @@ class ParallelIoStreamer {
             readerThread.join(2_000)
 
             val exitVal = proc.exitValue()
+            val hasCreatedFiles = (tempArchive.isFile && tempArchive.length() > 0L) ||
+                (tempArchive.parentFile?.listFiles { _, name -> name.startsWith(tmpPrefix) }?.isNotEmpty() == true)
             // 7-Zip exit code 0 = Success, 1 = Warning (e.g. transient locked/in-use files skipped)
-            val isSuccess = exitVal == 0 || (exitVal == 1 && tempArchive.isFile && tempArchive.length() > 0L)
+            val isSuccess = exitVal == 0 || (exitVal == 1 && hasCreatedFiles)
             if (!isSuccess) {
                 throw BackStageException(BackStageError.BackendIOError("7z pack failed (exit code $exitVal): $outputText"))
             }
 
             if (localVaultFile != null) {
+                val finalPrefix = "${localVaultFile.name}."
                 if (tempArchive.isFile) {
+                    // Single-file archive: clean up any old multi-volume parts (.001, .002, etc.)
+                    localVaultFile.parentFile?.listFiles { _, name ->
+                        name != tempArchive.name && name.startsWith(finalPrefix) && name.removePrefix(finalPrefix).toIntOrNull() != null
+                    }?.forEach { it.delete() }
                     dev.legendsayantan.backstage.core.backend.LocalPathBackend.atomicMoveWithFallback(tempArchive, localVaultFile)
                 } else {
-                    localVaultFile.writeBytes(ByteArray(0))
+                    val parent = tempArchive.parentFile ?: File(".")
+                    val parts = parent.listFiles { _, name ->
+                        name.startsWith(tmpPrefix) && name.removePrefix(tmpPrefix).toIntOrNull() != null
+                    }?.sortedBy { it.name }
+                    if (!parts.isNullOrEmpty()) {
+                        localVaultFile.delete()
+                        // Clean up any old multi-volume parts (.001, .002) of the final archive, but NEVER touch temp parts (.tmp.*)
+                        localVaultFile.parentFile?.listFiles { _, name ->
+                            !name.startsWith(tmpPrefix) && name.startsWith(finalPrefix) && name.removePrefix(finalPrefix).toIntOrNull() != null
+                        }?.forEach { it.delete() }
+                        for (part in parts) {
+                            val suffix = part.name.removePrefix(tempArchive.name)
+                            val finalPart = File(parent, "${localVaultFile.name}$suffix")
+                            dev.legendsayantan.backstage.core.backend.LocalPathBackend.atomicMoveWithFallback(part, finalPart)
+                        }
+                    } else {
+                        localVaultFile.writeBytes(ByteArray(0))
+                    }
                 }
             } else {
                 if (tempArchive.isFile) {
@@ -921,14 +957,15 @@ class ParallelIoStreamer {
     ): Long {
         val sevenZipExe = SevenZipDetector.ensureAvailable()
         val hexPassword = vaultKey.toHexString()
-        val localVaultFile = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)?.resolveFile(workspace.vaultFileName)
-        val archiveToExtract = if (localVaultFile != null && localVaultFile.isFile) {
-            localVaultFile
+        val localBackend = (backend as? dev.legendsayantan.backstage.core.backend.LocalPathBackend)
+        val localArchiveFile = localBackend?.resolveArchiveFile(workspace.vaultFileName)
+        val isDirectLocal = localArchiveFile != null && localArchiveFile.isFile
+        val archiveToExtract = if (isDirectLocal) {
+            localArchiveFile
         } else {
             val targetParent = targetDirectory.parentFile?.apply { mkdirs() } ?: targetDirectory.apply { mkdirs() }
             File.createTempFile("backstage_portable_extract_", ".7z", targetParent)
         }
-        val isDirectLocal = archiveToExtract == localVaultFile
         val vaultSize = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
         val estimatedTotal = (workspace.uncompressedSizeBytes ?: vaultSize).coerceAtLeast(1L)
 

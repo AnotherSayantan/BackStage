@@ -26,13 +26,43 @@ class LocalPathBackend(
         return File(rootDirectory, fileName)
     }
 
+    /**
+     * Resolves the primary archive file for extraction or validation.
+     * If [fileName] is a multi-volume 7z archive, returns `<fileName>.001` if present.
+     */
+    fun resolveArchiveFile(fileName: String): File {
+        val f = resolveFile(fileName)
+        if (f.isFile) return f
+        if (fileName.endsWith(".7z", ignoreCase = true)) {
+            val part1 = File(rootDirectory, "$fileName.001")
+            if (part1.isFile) return part1
+        }
+        return f
+    }
+
     override suspend fun exists(fileName: String): Boolean = withContext(Dispatchers.IO) {
-        File(rootDirectory, fileName).isFile
+        val f = File(rootDirectory, fileName)
+        if (f.isFile) return@withContext true
+        if (fileName.endsWith(".7z", ignoreCase = true)) {
+            File(rootDirectory, "$fileName.001").isFile
+        } else {
+            false
+        }
     }
 
     override suspend fun sizeBytes(fileName: String): Long = withContext(Dispatchers.IO) {
         val f = File(rootDirectory, fileName)
-        if (!f.isFile) 0L else f.length()
+        if (f.isFile) return@withContext f.length()
+        if (fileName.endsWith(".7z", ignoreCase = true)) {
+            val prefix = "$fileName."
+            val parts = rootDirectory.listFiles { _, name ->
+                name.startsWith(prefix) && name.removePrefix(prefix).toIntOrNull() != null
+            }
+            if (!parts.isNullOrEmpty()) {
+                return@withContext parts.sumOf { it.length() }
+            }
+        }
+        0L
     }
 
     override suspend fun readBytes(fileName: String, offset: Long, count: Int): ByteArray =
@@ -128,6 +158,12 @@ class LocalPathBackend(
 
     override suspend fun delete(fileName: String) = withContext(Dispatchers.IO) {
         File(rootDirectory, fileName).delete()
+        if (fileName.endsWith(".7z", ignoreCase = true)) {
+            val prefix = "$fileName."
+            rootDirectory.listFiles { _, name ->
+                name.startsWith(prefix) && name.removePrefix(prefix).toIntOrNull() != null
+            }?.forEach { it.delete() }
+        }
         Unit
     }
 
