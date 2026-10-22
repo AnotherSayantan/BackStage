@@ -1004,6 +1004,89 @@ class BackStageCoreTest {
         assertFalse(part1.exists(), "Part 1 should be deleted")
         assertFalse(part2.exists(), "Part 2 should be deleted")
     }
+
+    @Test
+    fun testSmartFallbackRestoreWhenFormatChangedInSettings() = runTest {
+        val deviceDir = File(tempRoot, "bstage_fallback_dev")
+        val localDir = File(tempRoot, "bstage_fallback_local")
+        val vaultDir = File(tempRoot, "bstage_fallback_vault")
+        localDir.mkdirs()
+        vaultDir.mkdirs()
+        File(localDir, "test_file.txt").writeText("Smart fallback content")
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val wsId = WorkspaceId("ws_FALLBACK_01")
+            val initialConfig = WorkspaceConfig(
+                id = wsId,
+                displayName = "Fallback Test",
+                vaultBackend = VaultBackendConfig.LocalPath(vaultDir.absolutePath),
+                vaultFileName = "fallback_vm.bvault",
+                localTargetPath = localDir.absolutePath,
+                vaultFormat = VaultFormatConfig.PlainCompressed,
+                keyMode = null,
+                createdAtEpochSeconds = 1700000000L,
+            )
+            engine.workspaceRepository.upsert(initialConfig)
+
+            // 1. Pack legacy .bvault in storage
+            val bvaultFile = File(vaultDir, "fallback_vm.bvault")
+            dev.legendsayantan.backstage.core.io.ParallelIoStreamer().packWorkspace(
+                workspace = initialConfig,
+                sourceDirectory = localDir,
+                backend = dev.legendsayantan.backstage.core.backend.LocalPathBackend(vaultDir),
+                vaultKey = ByteArray(32),
+                argon2Salt = ByteArray(16),
+                wrappedKey = ByteArray(60),
+            )
+            localDir.deleteRecursively()
+            assertTrue(bvaultFile.exists())
+
+            // 2. User changes format in settings to 7-Zip Plain (without archiving yet)
+            val updatedFormatConfig = initialConfig.copy(
+                vaultFormat = VaultFormatConfig.PlainSevenZip,
+                vaultFileName = "fallback_vm.7z",
+            )
+            engine.workspaceRepository.upsert(updatedFormatConfig)
+
+            // 3. User clicks Restore -> loadWorkspace should smartly resolve fallback_vm.bvault
+            engine.arbiter.loadWorkspace(wsId)
+            assertTrue(localDir.exists(), "Local directory should be restored via fallback")
+            assertEquals("Smart fallback content", File(localDir, "test_file.txt").readText())
+
+            // 4. Modify and Evict/Archive -> Should now pack to fallback_vm.7z and delete fallback_vm.bvault
+            File(localDir, "updated.txt").writeText("Updated in 7z")
+            engine.arbiter.evictWorkspace(wsId, forceIgnoreHandles = true)
+            assertFalse(localDir.exists())
+
+            val sevenZipFile = File(vaultDir, "fallback_vm.7z")
+            assertTrue(sevenZipFile.exists() || File(vaultDir, "fallback_vm.7z.001").exists(), "Should upgrade to 7z")
+            assertFalse(bvaultFile.exists(), "Old .bvault should be cleaned up")
+        }
+    }
+
+    @Test
+    fun testImportMultiVolumeSevenZipPartOne() = runTest {
+        val deviceDir = File(tempRoot, "bstage_importmv_dev")
+        val vaultDir = File(tempRoot, "bstage_importmv_vault")
+        val localDir = File(tempRoot, "bstage_importmv_local")
+        vaultDir.mkdirs()
+        localDir.mkdirs()
+
+        // Create mock .7z.001 part
+        val part1 = File(vaultDir, "project.7z.001")
+        part1.writeBytes(ByteArray(256) { 0x37 })
+
+        createUnlockedEngine(deviceDir).use { engine ->
+            assertEquals(AuthResult.Success, engine.authenticateAndUnlock())
+            val imported = engine.arbiter.importExistingVault(
+                vaultFile = part1,
+                localTargetDirectory = localDir,
+            )
+            assertEquals("project.7z", imported.vaultFileName, "Should normalize .7z.001 to project.7z")
+            assertEquals(VaultFormatConfig.PlainSevenZip, imported.vaultFormat, "Should detect 7-Zip format")
+        }
+    }
 }
 
 

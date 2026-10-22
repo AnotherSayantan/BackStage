@@ -495,7 +495,7 @@ fun BackStageApp(
                             (st as? WorkspaceState.Busy)?.let { id to it }
                         }
                     AnimatedVisibility(
-                        visible = busyEntries.isNotEmpty() && selectedWorkspaceForSettings != null,
+                        visible = busyEntries.isNotEmpty(),
                         enter = fadeIn() + expandVertically(animationSpec = spring(stiffness = Spring.StiffnessMediumLow)),
                         exit = fadeOut() + shrinkVertically(),
                         modifier = Modifier
@@ -1047,12 +1047,21 @@ private fun DashboardScreen(
                     modifier = Modifier.weight(1f),
                 )
 
+                val activeCount = remember(workspaces, states) {
+                    workspaces.count { (states[it.id] ?: WorkspaceState.Vaulted) is WorkspaceState.Active }
+                }
+                val archivedCount = remember(workspaces, states) {
+                    workspaces.count { (states[it.id] ?: WorkspaceState.Vaulted) is WorkspaceState.Vaulted }
+                }
+                val stagedCount = remember(workspaces, states) {
+                    workspaces.count { (states[it.id] ?: WorkspaceState.Vaulted) is WorkspaceState.StagedEncrypted }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     for ((filterKey, filterLabel) in listOf(
-                        "All" to "All",
-                        "Active" to "Active",
-                        "Archived" to "Archived",
-                        "Ready" to "Staged",
+                        "All" to if (workspaces.isNotEmpty()) "All (${workspaces.size})" else "All",
+                        "Active" to if (activeCount > 0) "Active ($activeCount)" else "Active",
+                        "Archived" to if (archivedCount > 0) "Archived ($archivedCount)" else "Archived",
+                        "Ready" to if (stagedCount > 0) "Staged ($stagedCount)" else "Staged",
                     )) {
                         FilterChipPill(
                             text = filterLabel,
@@ -1134,6 +1143,30 @@ private fun DashboardScreen(
                         color = TextMuted,
                         fontSize = 12.sp,
                     )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = onNewWorkspaceClick,
+                            shape = RoundedCornerShape(8.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentPrimary,
+                                contentColor = Color(0xFF12100B),
+                            ),
+                            modifier = Modifier.height(34.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                        ) {
+                            Text("New Workspace", fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                        OutlinedButton(
+                            onClick = onImportVaultClick,
+                            shape = RoundedCornerShape(8.dp),
+                            border = BorderStroke(1.dp, BorderColor),
+                            modifier = Modifier.height(34.dp),
+                            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 0.dp),
+                        ) {
+                            Text("Import Vault", color = TextMain, fontSize = 12.sp)
+                        }
+                    }
                 }
             }
         } else if (filteredWorkspaces.isEmpty()) {
@@ -1692,6 +1725,15 @@ private fun WorkspaceSettingsScreen(
         parsedTags != currentConfig.tags ||
         editedGroupId != currentConfig.groupId
 
+    var inlineFeedback by remember { mutableStateOf<String?>(null) }
+    var inlineFeedbackIsError by remember { mutableStateOf(false) }
+
+    fun showFeedback(message: String, isError: Boolean = false) {
+        inlineFeedback = message
+        inlineFeedbackIsError = isError
+        onFeedback(message)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1699,6 +1741,45 @@ private fun WorkspaceSettingsScreen(
             .padding(horizontal = 32.dp, vertical = 26.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        // In-Screen Animated Feedback Banner
+        AnimatedVisibility(
+            visible = inlineFeedback != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            val bg = if (inlineFeedbackIsError) DangerColor.copy(alpha = 0.12f) else AccentPrimary.copy(alpha = 0.12f)
+            val border = if (inlineFeedbackIsError) DangerColor.copy(alpha = 0.4f) else AccentPrimary.copy(alpha = 0.4f)
+            val textColor = if (inlineFeedbackIsError) DangerColor else AccentPrimary
+            Surface(
+                color = bg,
+                shape = RoundedCornerShape(8.dp),
+                border = BorderStroke(1.dp, border),
+                modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp).fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = inlineFeedback.orEmpty(),
+                        color = textColor,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .clickable { inlineFeedback = null },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        BackStageGlyph(type = GlyphType.CLOSE, color = textColor, size = 11.dp)
+                    }
+                }
+            }
+        }
+
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -1789,9 +1870,9 @@ private fun WorkspaceSettingsScreen(
                                                 targetDirectory = targetDir,
                                             )
                                         }
-                                        onFeedback("Created launcher script inside '${currentConfig.resolvedLocalPath()}'.")
+                                        showFeedback("Created launcher script inside '${currentConfig.resolvedLocalPath()}'.")
                                     }.onFailure { err ->
-                                        onFeedback("Could not create launcher: ${formatUserFriendlyError(err)}")
+                                        showFeedback("Could not create launcher: ${formatUserFriendlyError(err)}", isError = true)
                                     }
                                 }
                             },
@@ -1877,9 +1958,9 @@ private fun WorkspaceSettingsScreen(
                                             nextConfig
                                         }
                                         currentConfig = updated
-                                        onFeedback("Saved workspace details.")
+                                        showFeedback("Saved workspace details.")
                                     }.onFailure { err ->
-                                        onFeedback("Failed to save details: ${formatUserFriendlyError(err)}")
+                                        showFeedback("Failed to save details: ${formatUserFriendlyError(err)}", isError = true)
                                     }
                                 }
                             },
@@ -1945,9 +2026,9 @@ private fun WorkspaceSettingsScreen(
                                             nextConfig
                                         }
                                         currentConfig = updated
-                                        onFeedback("Saved folder locations.")
+                                        showFeedback("Saved folder locations.")
                                     }.onFailure { err ->
-                                        onFeedback("Failed to save locations: ${formatUserFriendlyError(err)}")
+                                        showFeedback("Failed to save locations: ${formatUserFriendlyError(err)}", isError = true)
                                     }
                                 }
                             },
@@ -2042,6 +2123,12 @@ private fun WorkspaceSettingsScreen(
 
                     if (formatChanged) {
                         Spacer(modifier = Modifier.height(12.dp))
+                        Text(
+                            text = "New format will be used automatically the next time this workspace is archived.",
+                            color = TextMuted,
+                            fontSize = 12.sp,
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
                         if (needsNewPasswordForMigration) {
                             StyledTextField(
                                 value = migrationPassword,
@@ -2059,17 +2146,43 @@ private fun WorkspaceSettingsScreen(
                                 scope.launch {
                                     isMigrating = true
                                     runCatching {
-                                        val updated = engine.arbiter.migrateVaultFormat(
-                                            workspaceId = currentConfig.id,
-                                            targetFormat = selectedFormat,
-                                            passwordForEncryption = migrationPassword.takeIf { it.isNotBlank() },
-                                        )
+                                        withContext(Dispatchers.IO) {
+                                            val newVaultFileName = "${currentConfig.vaultFileName.substringBeforeLast('.')}.${selectedFormat.fileExtension}"
+                                            val newKeyMode: WorkspaceKeyMode? = if (selectedFormat.isEncrypted) {
+                                                currentConfig.keyMode ?: WorkspaceKeyMode.PasswordBacked(
+                                                    keystoreAlias = WorkspaceConfig.defaultKeystoreAlias(currentConfig.id)
+                                                )
+                                            } else {
+                                                null
+                                            }
+                                            val targetAlias = (newKeyMode as? WorkspaceKeyMode.PasswordBacked)?.keystoreAlias
+                                                ?: WorkspaceConfig.defaultKeystoreAlias(currentConfig.id)
+                                            if (selectedFormat.isEncrypted && migrationPassword.isNotBlank()) {
+                                                val newKey = dev.legendsayantan.backstage.core.crypto.Blake3.hash(migrationPassword.encodeToByteArray())
+                                                engine.passwordVerifier.saveToKeystore(targetAlias, newKey)
+                                            } else if (!selectedFormat.isEncrypted) {
+                                                val oldKm = currentConfig.keyMode
+                                                if (oldKm is WorkspaceKeyMode.PasswordBacked) {
+                                                    runCatching { engine.keyProvider.delete(oldKm.keystoreAlias) }
+                                                }
+                                            }
+                                            val updated = currentConfig.copy(
+                                                vaultFormat = selectedFormat,
+                                                vaultFileName = newVaultFileName,
+                                                keyMode = newKeyMode,
+                                            )
+                                            engine.workspaceRepository.upsert(updated)
+                                            updated
+                                        }
+                                    }.onSuccess { updated ->
                                         currentConfig = updated
                                         migrationPassword = ""
-                                        hasStoredKeyInOsKeystore = engine.keyProvider.exists(keystoreAlias)
-                                        onFeedback("Updated protection format.")
+                                        val activeAlias = (currentConfig.keyMode as? WorkspaceKeyMode.PasswordBacked)?.keystoreAlias
+                                            ?: WorkspaceConfig.defaultKeystoreAlias(currentConfig.id)
+                                        hasStoredKeyInOsKeystore = engine.keyProvider.exists(activeAlias)
+                                        showFeedback("Vault format set to ${selectedFormat.fileExtension.uppercase()}. Will apply on next archive.")
                                     }.onFailure { err ->
-                                        onFeedback("Update failed: ${formatUserFriendlyError(err)}")
+                                        showFeedback("Could not update format: ${formatUserFriendlyError(err)}", isError = true)
                                     }
                                     isMigrating = false
                                 }
@@ -2080,7 +2193,7 @@ private fun WorkspaceSettingsScreen(
                                 contentColor = Color(0xFF12100B),
                             ),
                         ) {
-                            Text(if (isMigrating) "Updating..." else "Apply Format", fontWeight = FontWeight.SemiBold)
+                            Text(if (isMigrating) "Saving..." else "Save Format", fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -2173,7 +2286,7 @@ private fun WorkspaceSettingsScreen(
                                             next
                                         }
                                         currentConfig = updated
-                                        onFeedback(
+                                        showFeedback(
                                             if (manualOnly) "Password will now be requested on every use."
                                             else "Password will be remembered on this device after your next unlock."
                                         )
@@ -2221,7 +2334,7 @@ private fun WorkspaceSettingsScreen(
                                             val vaultExists = backend.exists(currentConfig.vaultFileName)
 
                                             if (!isLocalActive && vaultExists && !hasStoredKeyInOsKeystore) {
-                                                onFeedback("Please restore '${currentConfig.displayName}' with your current password first.")
+                                                showFeedback("Please restore '${currentConfig.displayName}' with your current password first.", isError = true)
                                                 return@launch
                                             }
 
@@ -2279,9 +2392,9 @@ private fun WorkspaceSettingsScreen(
                                             newPasswordInput = ""
                                             val hadKeyBefore = hasStoredKeyInOsKeystore
                                             hasStoredKeyInOsKeystore = engine.keyProvider.exists(keystoreAlias)
-                                            onFeedback(if (hadKeyBefore) "Password updated." else "Password set.")
+                                            showFeedback(if (hadKeyBefore) "Password updated." else "Password set.")
                                         }.onFailure {
-                                            onFeedback("Could not update password: ${formatUserFriendlyError(it)}")
+                                            showFeedback("Could not update password: ${formatUserFriendlyError(it)}", isError = true)
                                         }
                                     }
                                 },
@@ -2319,9 +2432,9 @@ private fun WorkspaceSettingsScreen(
                                                 currentConfig = updated
                                                 newPasswordInput = ""
                                                 hasStoredKeyInOsKeystore = engine.keyProvider.exists(keystoreAlias)
-                                                onFeedback("Updated password and signed out other devices.")
+                                                showFeedback("Updated password and signed out other devices.")
                                             }.onFailure {
-                                                onFeedback("Operation failed: ${formatUserFriendlyError(it)}")
+                                                showFeedback("Operation failed: ${formatUserFriendlyError(it)}", isError = true)
                                             }
                                         }
                                     },
@@ -2497,9 +2610,9 @@ private fun WorkspaceSettingsScreen(
                                         next
                                     }
                                     currentConfig = updated
-                                    onFeedback("Saved automation rules.")
+                                    showFeedback("Saved automation rules.")
                                 }.onFailure { err ->
-                                    onFeedback("Could not save rules: ${formatUserFriendlyError(err)}")
+                                    showFeedback("Could not save rules: ${formatUserFriendlyError(err)}", isError = true)
                                 }
                             }
                         },
@@ -2761,6 +2874,12 @@ private fun PasswordPromptDialog(
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
                 )
+            } else if (password.isNotEmpty() && confirmPassword.isEmpty()) {
+                Text(
+                    text = "Please confirm your password to enable Create",
+                    color = TextMuted,
+                    fontSize = 11.sp,
+                )
             }
         }
 
@@ -2902,7 +3021,14 @@ private fun NewWorkspaceDialog(
     ) {
         StyledTextField(
             value = name,
-            onValueChange = { name = it },
+            onValueChange = { newName ->
+                name = newName
+                val defaultPrefix = File(System.getProperty("user.home") ?: ".", "Workspaces").absolutePath
+                val slug = newName.trim().replace(Regex("[^a-zA-Z0-9_-]+"), "-").trim('-')
+                if (slug.isNotBlank() && (localTargetDir.startsWith(defaultPrefix) || localTargetDir.endsWith("NewProject"))) {
+                    localTargetDir = File(defaultPrefix, slug).absolutePath
+                }
+            },
             label = "Workspace Name",
             placeholder = "Project name...",
             enabled = !isSaving,
@@ -2997,6 +3123,12 @@ private fun NewWorkspaceDialog(
                     color = DangerColor,
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Medium,
+                )
+            } else if (password.isNotEmpty() && confirmPassword.isEmpty()) {
+                Text(
+                    text = "Please confirm your password to enable Create",
+                    color = TextMuted,
+                    fontSize = 11.sp,
                 )
             }
         }

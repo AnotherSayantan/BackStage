@@ -243,15 +243,38 @@ class DirectoryArbiter(
                 backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend)
             }
 
-            if (!effectiveBackend.exists(workspace.vaultFileName)) {
+            // Smart Fallback Resolution: if configured vaultFileName does not exist in cold storage,
+            // check for legacy files with the same base name (.7z, .bvault, .bstage)
+            val actualVaultFileName = if (effectiveBackend.exists(workspace.vaultFileName)) {
+                workspace.vaultFileName
+            } else {
+                val base = workspace.vaultFileName.substringBeforeLast('.')
+                listOf("$base.7z", "$base.bvault", "$base.bstage").firstOrNull { effectiveBackend.exists(it) }
+                    ?: workspace.vaultFileName
+            }
+
+            if (!effectiveBackend.exists(actualVaultFileName)) {
                 throw BackStageException(
                     BackStageError.VaultNotFound(workspace.vaultBackend, workspace.vaultFileName)
                 )
             }
 
+            // Derive actual format if we resolved a fallback file from cold storage
+            val actualFormat = when (actualVaultFileName.substringAfterLast('.')) {
+                "7z" -> if (workspace.vaultFormat.isEncrypted) VaultFormatConfig.Portable else VaultFormatConfig.PlainSevenZip
+                "bvault" -> VaultFormatConfig.PlainCompressed
+                "bstage" -> VaultFormatConfig.Native
+                else -> workspace.vaultFormat
+            }
+            val effectiveWorkspace = if (actualVaultFileName != workspace.vaultFileName) {
+                workspace.copy(vaultFileName = actualVaultFileName, vaultFormat = actualFormat)
+            } else {
+                workspace
+            }
+
             // State 1: KEY_CHECK
             setBusy(workspaceId, WorkspaceOperation.KEY_CHECK, 0.05f, "Checking workspace credentials...")
-            val keyState = passwordVerifier.assess(workspace, effectiveBackend)
+            val keyState = passwordVerifier.assess(effectiveWorkspace, effectiveBackend)
             val vaultKey: ByteArray = when (keyState) {
                 is VaultKeyState.Ready -> keyState.vaultKey
                 is VaultKeyState.NeedsPassword -> {
@@ -269,8 +292,8 @@ class DirectoryArbiter(
                         }
 
                     // Save verified vault_key to OS keystore if workspace is PasswordBacked
-                    if (workspace.keyMode is WorkspaceKeyMode.PasswordBacked) {
-                        passwordVerifier.saveToKeystore(workspace.keyMode.keystoreAlias, unwrapped)
+                    if (effectiveWorkspace.keyMode is WorkspaceKeyMode.PasswordBacked) {
+                        passwordVerifier.saveToKeystore(effectiveWorkspace.keyMode.keystoreAlias, unwrapped)
                         auditLogRepository.record(workspaceId, AuditEventType.NEW_DEVICE_UNLOCK)
                     }
                     unwrapped
@@ -305,7 +328,7 @@ class DirectoryArbiter(
             // State 3: Capacity Validation & Auto-Unload Arbitration
             val lruWorkspaces = workspaceRepository.findLeastRecentlyActive()
             val capacityResult = CapacityValidator.validateLocalCapacity(
-                targetWorkspace = workspace,
+                targetWorkspace = effectiveWorkspace,
                 backend = effectiveBackend,
                 allWorkspacesOrderedByLru = lruWorkspaces,
                 availableBytesOverride = availableBytesOverride,
@@ -336,7 +359,7 @@ class DirectoryArbiter(
             setBusy(workspaceId, WorkspaceOperation.EXTRACTING, 0.05f, "Decrypting and extracting workspace...")
             val extractedBytes = try {
                 ioStreamer.unpackWorkspace(
-                    workspace = workspace,
+                    workspace = effectiveWorkspace,
                     targetDirectory = targetDir,
                     backend = effectiveBackend,
                     vaultKey = vaultKey,
@@ -511,10 +534,20 @@ class DirectoryArbiter(
                     }
                     if (isLegacyFormat) {
                         workspaceRepository.upsert(effectiveWorkspace)
-                        if (oldVaultFileName != effectiveVaultFileName && backend.exists(oldVaultFileName)) {
-                            backend.delete(oldVaultFileName)
-                            backend.delete(BsmetaSidecar.sidecarFileName(oldVaultFileName))
+                    }
+                    // Clean up any alternate or legacy format files with the same base name
+                    val baseName = effectiveVaultFileName.substringBeforeLast('.')
+                    val alternateFiles = listOf("$baseName.bvault", "$baseName.bstage", "$baseName.7z")
+                        .filter { it != effectiveVaultFileName }
+                    for (altFile in alternateFiles) {
+                        if (backend.exists(altFile)) {
+                            backend.delete(altFile)
+                            backend.delete(BsmetaSidecar.sidecarFileName(altFile))
                         }
+                    }
+                    if (oldVaultFileName != effectiveVaultFileName && backend.exists(oldVaultFileName)) {
+                        backend.delete(oldVaultFileName)
+                        backend.delete(BsmetaSidecar.sidecarFileName(oldVaultFileName))
                     }
                     // Purge any stale staged copy since cold vault was updated
                     purgeStagedFiles(oldVaultFileName)
@@ -684,14 +717,20 @@ class DirectoryArbiter(
 
         val parentDir = vaultFile.parentFile ?: File(".")
         val backend = LocalPathBackend(parentDir)
-        val sidecarFile = File(parentDir, BsmetaSidecar.sidecarFileName(vaultFile.name))
+        val isMultiVolumePart = vaultFile.name.matches(Regex(""".*\.7z\.\d{3}$""", RegexOption.IGNORE_CASE))
+        val normalizedVaultName = if (isMultiVolumePart) {
+            vaultFile.name.substringBeforeLast('.')
+        } else {
+            vaultFile.name
+        }
+        val sidecarFile = File(parentDir, BsmetaSidecar.sidecarFileName(normalizedVaultName))
         val sidecar = if (sidecarFile.isFile) {
             runCatching { BsmetaSidecar.decode(sidecarFile.readText()) }.getOrNull()
         } else {
             null
         }
 
-        val ext = vaultFile.extension.lowercase()
+        val ext = normalizedVaultName.substringAfterLast('.').lowercase()
         val format = when (ext) {
             "bstage" -> VaultFormatConfig.Native
             "7z" -> {
@@ -703,8 +742,8 @@ class DirectoryArbiter(
             }
             "bvault" -> VaultFormatConfig.PlainCompressed
             else -> {
-                val magic = backend.readBytes(vaultFile.name, 0L, 4)
-                if (magic.contentEquals(dev.legendsayantan.backstage.core.crypto.TinyHeader.MAGIC_BVAULT)) {
+                val magic = runCatching { backend.readBytes(vaultFile.name, 0L, 4) }.getOrNull()
+                if (magic != null && magic.contentEquals(dev.legendsayantan.backstage.core.crypto.TinyHeader.MAGIC_BVAULT)) {
                     VaultFormatConfig.PlainCompressed
                 } else {
                     VaultFormatConfig.Native
@@ -753,7 +792,7 @@ class DirectoryArbiter(
             id = wsId,
             displayName = resolvedName,
             vaultBackend = dev.legendsayantan.backstage.core.workspace.VaultBackendConfig.LocalPath(parentDir.absolutePath),
-            vaultFileName = vaultFile.name,
+            vaultFileName = normalizedVaultName,
             localTargetPath = localTargetDirectory.absolutePath,
             vaultFormat = format,
             keyMode = keyMode,
