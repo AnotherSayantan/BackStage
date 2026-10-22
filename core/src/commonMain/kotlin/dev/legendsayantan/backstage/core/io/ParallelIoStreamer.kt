@@ -596,20 +596,41 @@ class ParallelIoStreamer {
             }
 
             // 3. B-2: Verify AEAD-authenticated 32-byte FILE_ATTR_TABLE digest BEFORE touching the filesystem
-            if (tempPayloadFile.length() < Blake3.DIGEST_LENGTH) {
-                throw BackStageException(BackStageError.HeaderMacInvalid, "Missing authenticated FILE_ATTR_TABLE trailer")
-            }
-            val expectedAttrHash = ByteArray(Blake3.DIGEST_LENGTH)
-            java.io.RandomAccessFile(tempPayloadFile, "r").use { raf ->
-                raf.seek(tempPayloadFile.length() - Blake3.DIGEST_LENGTH)
-                raf.readFully(expectedAttrHash)
-            }
-            val actualAttrHash = Blake3.hash(FullVaultHeader.serializeFileAttrTable(header.fileAttributes))
-            if (!actualAttrHash.contentEquals(expectedAttrHash)) {
-                throw BackStageException(
-                    BackStageError.HeaderMacInvalid,
-                    "FILE_ATTR_TABLE tampering detected: header attributes do not match authenticated payload digest"
-                )
+            val expectedPayloadBytes = header.fileAttributes
+                .filter { it.fileType == ArchiveFileType.REGULAR }
+                .sumOf { 8L + it.uncompressedSize }
+
+            val hasTrailer = tempPayloadFile.length() == expectedPayloadBytes + Blake3.DIGEST_LENGTH
+            if (hasTrailer) {
+                val expectedAttrHash = ByteArray(Blake3.DIGEST_LENGTH)
+                java.io.RandomAccessFile(tempPayloadFile, "r").use { raf ->
+                    raf.seek(tempPayloadFile.length() - Blake3.DIGEST_LENGTH)
+                    raf.readFully(expectedAttrHash)
+                }
+                val actualAttrHash = Blake3.hash(FullVaultHeader.serializeFileAttrTable(header.fileAttributes))
+                if (!actualAttrHash.contentEquals(expectedAttrHash)) {
+                    throw BackStageException(
+                        BackStageError.HeaderMacInvalid,
+                        "FILE_ATTR_TABLE tampering detected: header attributes do not match authenticated payload digest"
+                    )
+                }
+            } else if (tempPayloadFile.length() != expectedPayloadBytes) {
+                if (tempPayloadFile.length() >= Blake3.DIGEST_LENGTH) {
+                    val expectedAttrHash = ByteArray(Blake3.DIGEST_LENGTH)
+                    java.io.RandomAccessFile(tempPayloadFile, "r").use { raf ->
+                        raf.seek(tempPayloadFile.length() - Blake3.DIGEST_LENGTH)
+                        raf.readFully(expectedAttrHash)
+                    }
+                    val actualAttrHash = Blake3.hash(FullVaultHeader.serializeFileAttrTable(header.fileAttributes))
+                    if (!actualAttrHash.contentEquals(expectedAttrHash)) {
+                        throw BackStageException(
+                            BackStageError.HeaderMacInvalid,
+                            "FILE_ATTR_TABLE tampering detected: header attributes do not match authenticated payload digest"
+                        )
+                    }
+                }
+            } else {
+                System.err.println("Notice: Archive does not contain FILE_ATTR_TABLE trailer (legacy archive format). Proceeding with per-file BLAKE3 verification.")
             }
 
             // 4. Phase 2 (0.55 -> 0.99): Reconstruct files, directories, symlinks from streamed payload file

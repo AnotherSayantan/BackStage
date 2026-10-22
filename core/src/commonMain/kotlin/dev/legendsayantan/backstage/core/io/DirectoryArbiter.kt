@@ -430,9 +430,13 @@ class DirectoryArbiter(
             updateState(workspace.id, WorkspaceState.Active)
             } // end withLock
         } catch (e: BackStageException) {
+            System.err.println("DirectoryArbiter.loadWorkspace BackStageException: ${e.message}")
+            e.printStackTrace()
             updateState(workspaceId, WorkspaceState.Error(e.error, e.message))
             throw e
         } catch (e: Exception) {
+            System.err.println("DirectoryArbiter.loadWorkspace unexpected Exception: ${e.message}")
+            e.printStackTrace()
             val wrapped = BackStageError.BackendIOError(e.message ?: "Unexpected load failure")
             updateState(workspaceId, WorkspaceState.Error(wrapped, e.message ?: "Unexpected load failure"))
             throw BackStageException(wrapped, e.message ?: "Unexpected load failure", e)
@@ -603,8 +607,16 @@ class DirectoryArbiter(
             updateState(workspace.id, WorkspaceState.Vaulted)
             } // end withLock
         } catch (e: BackStageException) {
+            System.err.println("DirectoryArbiter.evictWorkspace BackStageException: ${e.message}")
+            e.printStackTrace()
             updateState(workspaceId, WorkspaceState.Error(e.error, e.message))
             throw e
+        } catch (e: Exception) {
+            System.err.println("DirectoryArbiter.evictWorkspace unexpected Exception: ${e.message}")
+            e.printStackTrace()
+            val wrapped = BackStageError.BackendIOError(e.message ?: "Unexpected eviction failure")
+            updateState(workspaceId, WorkspaceState.Error(wrapped, e.message ?: "Unexpected eviction failure"))
+            throw BackStageException(wrapped, e.message ?: "Unexpected eviction failure", e)
         }
     }
 
