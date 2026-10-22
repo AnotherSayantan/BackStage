@@ -2054,38 +2054,17 @@ private fun WorkspaceSettingsScreen(
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Column(modifier = Modifier.padding(20.dp)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Vault Format",
-                                fontSize = 15.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextMain,
-                            )
-                            Text(
-                                text = "Choose how this workspace is stored when archived.",
-                                fontSize = 12.sp,
-                                color = TextMuted,
-                            )
-                        }
-                        Switch(
-                            checked = encryptionEnabled,
-                            colors = SwitchDefaults.colors(
-                                checkedThumbColor = Color(0xFF12100B),
-                                checkedTrackColor = AccentPrimary,
-                            ),
-                            onCheckedChange = { enabled ->
-                                encryptionEnabled = enabled
-                                selectedFormat = if (enabled) {
-                                    VaultFormatConfig.Portable
-                                } else {
-                                    VaultFormatConfig.PlainSevenZip
-                                }
-                            },
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = "Vault Format",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = TextMain,
+                        )
+                        Text(
+                            text = "Choose how this workspace is stored when archived.",
+                            fontSize = 12.sp,
+                            color = TextMuted,
                         )
                     }
 
@@ -2157,10 +2136,12 @@ private fun WorkspaceSettingsScreen(
                                             }
                                             val targetAlias = (newKeyMode as? WorkspaceKeyMode.PasswordBacked)?.keystoreAlias
                                                 ?: WorkspaceConfig.defaultKeystoreAlias(currentConfig.id)
+                                            val localTarget = File(currentConfig.resolvedLocalPath())
+                                            val isLocalActive = localTarget.isDirectory && (FolderLock.readLock(localTarget) != null || (localTarget.listFiles()?.isNotEmpty() == true))
                                             if (selectedFormat.isEncrypted && migrationPassword.isNotBlank()) {
                                                 val newKey = dev.legendsayantan.backstage.core.crypto.Blake3.hash(migrationPassword.encodeToByteArray())
                                                 engine.passwordVerifier.saveToKeystore(targetAlias, newKey)
-                                            } else if (!selectedFormat.isEncrypted) {
+                                            } else if (!selectedFormat.isEncrypted && isLocalActive) {
                                                 val oldKm = currentConfig.keyMode
                                                 if (oldKm is WorkspaceKeyMode.PasswordBacked) {
                                                     runCatching { engine.keyProvider.delete(oldKm.keystoreAlias) }
@@ -2172,6 +2153,7 @@ private fun WorkspaceSettingsScreen(
                                                 keyMode = newKeyMode,
                                             )
                                             engine.workspaceRepository.upsert(updated)
+                                            engine.arbiter.refreshStates()
                                             updated
                                         }
                                     }.onSuccess { updated ->

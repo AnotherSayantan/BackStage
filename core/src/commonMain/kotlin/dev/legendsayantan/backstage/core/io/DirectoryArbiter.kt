@@ -84,11 +84,26 @@ class DirectoryArbiter(
         val localDir = File(workspace.resolvedLocalPath())
         val localDirIsDirectory = runCatching { localDir.isDirectory }.getOrDefault(false)
 
-        val stagedFile = File(stagingDir, workspace.vaultFileName)
-        val stagedExists = runCatching { stagedFile.isFile }.getOrDefault(false)
+        val base = workspace.vaultFileName.substringBeforeLast('.')
+        val candidateNames = linkedSetOf(
+            workspace.vaultFileName,
+            "$base.7z",
+            "$base.bvault",
+            "$base.bstage",
+            "$base.7z.001",
+        )
+
+        val stagedExists = runCatching {
+            candidateNames.any { name ->
+                val f = File(stagingDir, name)
+                f.isFile || File(stagingDir, "$name.001").isFile
+            }
+        }.getOrDefault(false)
 
         val backend = runCatching { backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend) }.getOrNull()
-        val vaultExists = runCatching { backend?.exists(workspace.vaultFileName) == true }.getOrDefault(false)
+        val vaultExists = runCatching {
+            backend != null && candidateNames.any { backend.exists(it) }
+        }.getOrDefault(false)
 
         if (localDirIsDirectory) {
             val lock = FolderLock.readLock(localDir)
@@ -165,8 +180,10 @@ class DirectoryArbiter(
         // Set initial busy state immediately so UI updates on the very first frame (< 5ms)
         val preState = _states.value[workspaceId]
         if (preState !is WorkspaceState.Busy) {
-            val stagedVaultFile = File(stagingDir, workspace.vaultFileName)
-            val initialMsg = if (stagedVaultFile.isFile) "Verifying staged archive..." else "Preparing restore..."
+            val base = workspace.vaultFileName.substringBeforeLast('.')
+            val stagedCandidates = listOf(workspace.vaultFileName, "$base.7z", "$base.bvault", "$base.bstage")
+            val stagedVaultFile = stagedCandidates.map { File(stagingDir, it) }.firstOrNull { it.isFile }
+            val initialMsg = if (stagedVaultFile != null) "Verifying staged archive..." else "Preparing restore..."
             setBusy(workspaceId, WorkspaceOperation.VALIDATING, 0.02f, initialMsg)
         }
 
@@ -180,8 +197,11 @@ class DirectoryArbiter(
             }
 
             // Check if a staged encrypted prefetch exists locally and verify its integrity
-            val stagedVaultFile = File(stagingDir, workspace.vaultFileName)
-            val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
+            val base = workspace.vaultFileName.substringBeforeLast('.')
+            val stagedCandidates = listOf(workspace.vaultFileName, "$base.7z", "$base.bvault", "$base.bstage")
+            val stagedVaultFile = stagedCandidates.map { File(stagingDir, it) }.firstOrNull { it.isFile }
+                ?: File(stagingDir, workspace.vaultFileName)
+            val stagedMacFile = File(stagingDir, "${stagedVaultFile.name}.bsstage_mac")
             val useStagedFile = if (stagedVaultFile.isFile) {
                 val validStaged = if (stagedMacFile.isFile) {
                     val macRaw = runCatching { stagedMacFile.readText().trim() }.getOrDefault("")
@@ -230,7 +250,7 @@ class DirectoryArbiter(
                     // Corrupted or incomplete staged file -> purge and fall back to remote/cold backend
                     stagedVaultFile.delete()
                     stagedMacFile.delete()
-                    File(stagingDir, BsmetaSidecar.sidecarFileName(workspace.vaultFileName)).delete()
+                    File(stagingDir, BsmetaSidecar.sidecarFileName(stagedVaultFile.name)).delete()
                 }
                 validStaged
             } else {
@@ -248,8 +268,8 @@ class DirectoryArbiter(
             val actualVaultFileName = if (effectiveBackend.exists(workspace.vaultFileName)) {
                 workspace.vaultFileName
             } else {
-                val base = workspace.vaultFileName.substringBeforeLast('.')
-                listOf("$base.7z", "$base.bvault", "$base.bstage").firstOrNull { effectiveBackend.exists(it) }
+                val baseName = workspace.vaultFileName.substringBeforeLast('.')
+                listOf("$baseName.7z", "$baseName.bvault", "$baseName.bstage", "$baseName.7z.001").firstOrNull { effectiveBackend.exists(it) }
                     ?: workspace.vaultFileName
             }
 
@@ -260,10 +280,12 @@ class DirectoryArbiter(
             }
 
             // Derive actual format if we resolved a fallback file from cold storage
-            val actualFormat = when (actualVaultFileName.substringAfterLast('.')) {
-                "7z" -> if (workspace.vaultFormat.isEncrypted) VaultFormatConfig.Portable else VaultFormatConfig.PlainSevenZip
-                "bvault" -> VaultFormatConfig.PlainCompressed
-                "bstage" -> VaultFormatConfig.Native
+            val actualFormat = when {
+                actualVaultFileName.endsWith(".bvault", ignoreCase = true) -> VaultFormatConfig.PlainCompressed
+                actualVaultFileName.endsWith(".bstage", ignoreCase = true) -> VaultFormatConfig.Native
+                actualVaultFileName.endsWith(".7z", ignoreCase = true) || actualVaultFileName.contains(".7z.") -> {
+                    if (workspace.vaultFormat.isEncrypted) VaultFormatConfig.Portable else VaultFormatConfig.PlainSevenZip
+                }
                 else -> workspace.vaultFormat
             }
             val effectiveWorkspace = if (actualVaultFileName != workspace.vaultFileName) {
@@ -602,8 +624,11 @@ class DirectoryArbiter(
             "Cannot stage unencrypted workspace '${workspace.displayName}'"
         }
 
-        val stagedVault = File(stagingDir, workspace.vaultFileName)
-        val stagedMacFile = File(stagingDir, "${workspace.vaultFileName}.bsstage_mac")
+        val base = workspace.vaultFileName.substringBeforeLast('.')
+        val stagedCandidates = listOf(workspace.vaultFileName, "$base.7z", "$base.bvault", "$base.bstage")
+        val stagedVault = stagedCandidates.map { File(stagingDir, it) }.firstOrNull { it.isFile }
+            ?: File(stagingDir, workspace.vaultFileName)
+        val stagedMacFile = File(stagingDir, "${stagedVault.name}.bsstage_mac")
 
         // Fast-path check: if already staged and valid, avoid re-downloading
         if (stagedVault.isFile && stagedMacFile.isFile) {
@@ -639,18 +664,25 @@ class DirectoryArbiter(
             }
 
             val backend = backendOverride ?: VaultBackendFactory.create(workspace.vaultBackend)
-            if (!backend.exists(workspace.vaultFileName)) {
+            val actualVaultFileName = if (backend.exists(workspace.vaultFileName)) {
+                workspace.vaultFileName
+            } else {
+                val baseName = workspace.vaultFileName.substringBeforeLast('.')
+                listOf("$baseName.7z", "$baseName.bvault", "$baseName.bstage", "$baseName.7z.001").firstOrNull { backend.exists(it) }
+                    ?: workspace.vaultFileName
+            }
+            if (!backend.exists(actualVaultFileName)) {
                 throw BackStageException(BackStageError.VaultNotFound(workspace.vaultBackend, workspace.vaultFileName))
             }
 
-            val totalVaultBytes = runCatching { backend.sizeBytes(workspace.vaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
-            val tempStaged = File(stagingDir, "${workspace.vaultFileName}.part")
+            val totalVaultBytes = runCatching { backend.sizeBytes(actualVaultFileName) }.getOrDefault(0L).coerceAtLeast(1L)
+            val tempStaged = File(stagingDir, "${actualVaultFileName}.part")
             val hasher = dev.legendsayantan.backstage.core.crypto.Blake3.StreamingHasher()
 
             try {
                 setBusy(workspaceId, WorkspaceOperation.EXTRACTING, 0.02f, "Staging vault locally...")
                 var stagedBytesSoFar = 0L
-                backend.openReadStream(workspace.vaultFileName).use { source ->
+                backend.openReadStream(actualVaultFileName).use { source ->
                     java.io.FileOutputStream(tempStaged).buffered().use { fos ->
                         val ioBuf = kotlinx.io.Buffer()
                         val byteBuf = ByteArray(65_536)
@@ -685,7 +717,7 @@ class DirectoryArbiter(
                 if (tempStaged.exists()) tempStaged.delete()
             }
 
-            val sidecarName = BsmetaSidecar.sidecarFileName(workspace.vaultFileName)
+            val sidecarName = BsmetaSidecar.sidecarFileName(actualVaultFileName)
             if (backend.exists(sidecarName)) {
                 File(stagingDir, sidecarName).writeBytes(backend.readAllBytes(sidecarName))
             }

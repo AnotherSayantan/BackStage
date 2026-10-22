@@ -1049,6 +1049,10 @@ class BackStageCoreTest {
             )
             engine.workspaceRepository.upsert(updatedFormatConfig)
 
+            // Verify state is recognized as Vaulted (NOT Missing) even though fallback_vm.7z doesn't exist yet
+            val detectedState = engine.arbiter.detectWorkspaceState(updatedFormatConfig)
+            assertEquals(WorkspaceState.Vaulted, detectedState, "Should detect as Vaulted via fallback, NOT Missing")
+
             // 3. User clicks Restore -> loadWorkspace should smartly resolve fallback_vm.bvault
             engine.arbiter.loadWorkspace(wsId)
             assertTrue(localDir.exists(), "Local directory should be restored via fallback")

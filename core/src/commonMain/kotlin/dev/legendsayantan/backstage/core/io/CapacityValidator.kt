@@ -24,25 +24,38 @@ object CapacityValidator {
     ): Long {
         workspace.uncompressedSizeBytes?.takeIf { it > 0L }?.let { return it }
 
-        if (!backend.exists(workspace.vaultFileName)) return 0L
+        val base = workspace.vaultFileName.substringBeforeLast('.')
+        val candidates = listOf(workspace.vaultFileName, "$base.7z", "$base.bvault", "$base.bstage", "$base.7z.001")
+        val actualFileName = candidates.firstOrNull { backend.exists(it) } ?: workspace.vaultFileName
 
-        return when (workspace.vaultFormat) {
+        if (!backend.exists(actualFileName)) return 0L
+
+        val effectiveFormat = when {
+            actualFileName.endsWith(".bvault", ignoreCase = true) -> VaultFormatConfig.PlainCompressed
+            actualFileName.endsWith(".bstage", ignoreCase = true) -> VaultFormatConfig.Native
+            actualFileName.endsWith(".7z", ignoreCase = true) || actualFileName.contains(".7z.") -> {
+                if (workspace.vaultFormat.isEncrypted) VaultFormatConfig.Portable else VaultFormatConfig.PlainSevenZip
+            }
+            else -> workspace.vaultFormat
+        }
+
+        return when (effectiveFormat) {
             VaultFormatConfig.Native, VaultFormatConfig.PlainCompressed -> {
                 runCatching {
                     val tinyBytes = backend.readBytes(
-                        fileName = workspace.vaultFileName,
+                        fileName = actualFileName,
                         offset = 0L,
                         count = TinyHeader.TINY_HEADER_BYTES,
                     )
                     val tiny = TinyHeader.parse(tinyBytes)
                     tiny.chunkCount.toLong() * tiny.chunkSize.toLong()
                 }.getOrElse {
-                    backend.sizeBytes(workspace.vaultFileName) * 2L
+                    backend.sizeBytes(actualFileName) * 2L
                 }
             }
             VaultFormatConfig.Portable, VaultFormatConfig.PlainSevenZip -> {
                 // Estimate 2.5x compressed .7z size if cached uncompressed size is unknown
-                (backend.sizeBytes(workspace.vaultFileName) * 5L) / 2L
+                (backend.sizeBytes(actualFileName) * 5L) / 2L
             }
         }
     }
